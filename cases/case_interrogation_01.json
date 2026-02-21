@@ -1,0 +1,48 @@
+{
+  "case_id": "case_001",
+
+  "overview": {
+    "time": "2026-01-12 23:00",
+    "place": "주택가 골목",
+    "type": "강도 살인 미수"
+  },
+
+  "motive": "금전적 곤궁으로 인한 충동 범행",
+
+  "crime_flow": "용의자는 밤 11시경 주택가 골목에서 귀가 중이던 피해자를 위협해 금품을 빼앗으려 했다. 피해자가 저항하자 흉기를 휘둘렀고, 중상을 입혔으나 사망에는 이르지 않았다. 이후 용의자는 현장을 벗어났다.",
+
+  "suspect": {
+    "name": "김철수",
+    "age": 34,
+    "job": "무직",
+    "relation": "피해자와 일면식 없음"
+  },
+
+  "false_statement": "사건 발생 시각에 집에 있었으며 외출한 적이 없다.",
+
+  "evidences": [
+    {
+      "id": "cctv_01",
+      "name": "골목 CCTV",
+      "description": "사건 발생 시각인 23시 10분경, 용의자의 체형과 유사한 인물이 골목을 통과하는 장면이 촬영됨"
+    },
+    {
+      "id": "knife_01",
+      "name": "흉기",
+      "description": "사건 현장 인근에서 발견된 칼에 피해자의 혈흔이 묻어 있음"
+    }
+  ],
+
+  "contradictions": [
+    {
+      "id": "time_mismatch",
+      "description": "용의자는 23시에 집에 있었다고 주장하지만, CCTV에는 23시 10분에 골목을 지나는 인물이 포착됨",
+      "related_evidence": ["cctv_01"]
+    },
+    {
+      "id": "weapon_denial",
+      "description": "용의자는 흉기를 소지한 적이 없다고 말하지만, 현장에서 발견된 칼과 체형·이동 경로가 일치함",
+      "related_evidence": ["knife_01"]
+    }
+  ]
+}

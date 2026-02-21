@@ -1,0 +1,7 @@
+Set-Location -Path "c:\Users\PC\Downloads\server (3)\server (2)\server\server"
+@'
+.env
+.venv/
+__pycache__/
+*.pyc
+'@ | Set-Content -Encoding UTF8 .gitignore
