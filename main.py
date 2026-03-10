@@ -3,6 +3,7 @@ import json
 import base64
 import traceback
 import re
+import hashlib
 from io import BytesIO
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -56,6 +57,7 @@ async def health():
 # IN-MEMORY STORE (서버 재시작하면 초기화)
 # =========================================================
 CASE_CACHE: Dict[str, Dict[str, Any]] = {}
+INTERROGATION_PROGRESS_CACHE: Dict[str, Dict[str, Dict[str, Any]]] = {}
 
 # =========================================================
 # EXAMPLE CASE (템플릿 예시로만 사용)
@@ -159,16 +161,16 @@ def extract_case_keywords(case_data: Optional[Dict[str, Any]]) -> Tuple[List[str
 
 PRESSURE_LEVEL_BONUS = {
     "none": 0.0,
-    "low": 0.01,
-    "medium": 0.03,
-    "high": 0.06,
+    "low": 0.005,
+    "medium": 0.015,
+    "high": 0.03,
 }
 
 CONFESSION_LEVEL_BONUS = {
     "none": 0.0,
     "low": 0.0,
-    "medium": 0.02,
-    "high": 0.04,
+    "medium": 0.01,
+    "high": 0.02,
 }
 
 INTERROGATION_EVAL_SCHEMA = {
@@ -516,6 +518,76 @@ def _count_meaningful_turns(history: List[Dict[str, Any]], user_text: str) -> in
 
     return count
 
+def _normalize_history_for_progress(history: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+    normalized: List[Dict[str, str]] = []
+    for entry in history:
+        if not isinstance(entry, dict):
+            continue
+        normalized.append(
+            {
+                "user_text": norm(entry.get("user_text", "")),
+                "suspect_text": norm(entry.get("suspect_text", "")),
+            }
+        )
+    return normalized
+
+def _history_progress_key(history: List[Dict[str, Any]]) -> str:
+    payload = json.dumps(
+        _normalize_history_for_progress(history),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()
+
+def _empty_progress_state() -> Dict[str, Any]:
+    return {
+        "confession_probability": 0.0,
+        "referenced_evidence_ids": [],
+        "established_contradiction_ids": [],
+    }
+
+def _get_progress_state(case_id: str, history: List[Dict[str, Any]]) -> Dict[str, Any]:
+    if not case_id:
+        return _empty_progress_state()
+
+    progress_by_history = INTERROGATION_PROGRESS_CACHE.get(case_id) or {}
+    state = progress_by_history.get(_history_progress_key(history))
+    if not isinstance(state, dict):
+        return _empty_progress_state()
+
+    return {
+        "confession_probability": clamp01(state.get("confession_probability", 0.0)),
+        "referenced_evidence_ids": list(state.get("referenced_evidence_ids", []) or []),
+        "established_contradiction_ids": list(
+            state.get("established_contradiction_ids", []) or []
+        ),
+    }
+
+def _store_progress_state(
+    case_id: str,
+    history: List[Dict[str, Any]],
+    confession_probability: float,
+    evidence_ids: List[str],
+    contradiction_ids: List[str],
+) -> None:
+    if not case_id:
+        return
+
+    progress_by_history = INTERROGATION_PROGRESS_CACHE.setdefault(case_id, {})
+    progress_by_history[_history_progress_key(history)] = {
+        "confession_probability": clamp01(confession_probability),
+        "referenced_evidence_ids": sorted(
+            {str(eid).strip() for eid in (evidence_ids or []) if str(eid).strip()}
+        ),
+        "established_contradiction_ids": sorted(
+            {str(cid).strip() for cid in (contradiction_ids or []) if str(cid).strip()}
+        ),
+    }
+
+    while len(progress_by_history) > 64:
+        oldest_key = next(iter(progress_by_history))
+        progress_by_history.pop(oldest_key, None)
+
 def build_case_context(case_data: Optional[Dict[str, Any]]) -> str:
     """
     LLM에게 줄 컨텍스트(심문 게임용 내부 사건 정보)
@@ -609,19 +681,31 @@ def calc_pressure_and_prob_v2(
     history: List[Dict[str, Any]],
     user_text: str,
     interrogation_signal: Optional[Dict[str, Any]] = None,
-) -> Tuple[float, float]:
+    prior_progress: Optional[Dict[str, Any]] = None,
+) -> Tuple[float, float, List[str], List[str]]:
     if not case_data:
-        return 0.0, 0.0
+        return 0.0, 0.0, [], []
 
     signal = interrogation_signal or llm_evaluate_interrogation(case_data, history, user_text)
+    prior_progress = prior_progress or _empty_progress_state()
 
-    before_evidence_ids = set(signal["before_current_turn"]["referenced_evidence_ids"])
+    prior_confession_probability = clamp01(
+        prior_progress.get("confession_probability", 0.0)
+    )
+    prior_evidence_ids = {
+        str(eid).strip()
+        for eid in (prior_progress.get("referenced_evidence_ids", []) or [])
+        if str(eid).strip()
+    }
+    prior_contradiction_ids = {
+        str(cid).strip()
+        for cid in (prior_progress.get("established_contradiction_ids", []) or [])
+        if str(cid).strip()
+    }
+
     current_evidence_ids = set(signal["current_turn"]["referenced_evidence_ids"])
     after_evidence_ids = set(signal["after_current_turn"]["referenced_evidence_ids"])
 
-    before_contradiction_ids = set(
-        signal["before_current_turn"]["established_contradiction_ids"]
-    )
     current_contradiction_ids = set(
         signal["current_turn"]["established_contradiction_ids"]
     )
@@ -629,39 +713,61 @@ def calc_pressure_and_prob_v2(
         signal["after_current_turn"]["established_contradiction_ids"]
     )
 
-    new_evidence_ids = after_evidence_ids - before_evidence_ids
-    repeated_evidence_ids = current_evidence_ids - new_evidence_ids
-    new_contradiction_ids = after_contradiction_ids - before_contradiction_ids
-    repeated_contradiction_ids = current_contradiction_ids - new_contradiction_ids
+    cumulative_evidence_ids = prior_evidence_ids | after_evidence_ids
+    cumulative_contradiction_ids = prior_contradiction_ids | after_contradiction_ids
+
+    new_evidence_ids = cumulative_evidence_ids - prior_evidence_ids
+    repeated_evidence_ids = current_evidence_ids & prior_evidence_ids
+    new_contradiction_ids = cumulative_contradiction_ids - prior_contradiction_ids
+    repeated_contradiction_ids = current_contradiction_ids & prior_contradiction_ids
 
     pressure_level = signal["current_turn"].get("pressure_level", "none")
     pressure_delta = (
-        0.10 * len(new_evidence_ids)
-        + 0.03 * len(repeated_evidence_ids)
-        + 0.30 * len(new_contradiction_ids)
-        + 0.08 * len(repeated_contradiction_ids)
+        0.04 * len(new_evidence_ids)
+        + 0.01 * len(repeated_evidence_ids)
+        + 0.14 * len(new_contradiction_ids)
+        + 0.03 * len(repeated_contradiction_ids)
         + PRESSURE_LEVEL_BONUS.get(pressure_level, 0.0)
     )
 
     if not user_text or is_too_ambiguous(user_text):
         pressure_delta = 0.0
     elif detect_repeat(history, user_text):
-        pressure_delta *= 0.4
+        pressure_delta *= 0.35
 
-    pressure_delta = clamp01(min(0.45, pressure_delta))
+    pressure_delta = clamp01(min(0.20, pressure_delta))
 
     meaningful_turns = _count_meaningful_turns(history, user_text)
-    confession_probability = (
-        0.10 * len(after_evidence_ids)
-        + 0.36 * len(after_contradiction_ids)
-        + min(0.06, 0.01 * meaningful_turns)
+    computed_probability = (
+        0.05 * len(cumulative_evidence_ids)
+        + 0.20 * len(cumulative_contradiction_ids)
+        + min(0.08, 0.01 * meaningful_turns)
         + CONFESSION_LEVEL_BONUS.get(pressure_level, 0.0)
     )
 
-    if detect_repeat(history, user_text):
-        confession_probability = max(0.0, confession_probability - 0.02)
+    max_gain = 0.10
+    if new_evidence_ids:
+        max_gain += 0.03
+    if new_contradiction_ids:
+        max_gain += 0.06
+    if pressure_level == "high":
+        max_gain += 0.02
+    max_gain = min(0.20, max_gain)
 
-    return pressure_delta, clamp01(confession_probability)
+    confession_probability = max(
+        prior_confession_probability,
+        min(computed_probability, prior_confession_probability + max_gain),
+    )
+
+    if detect_repeat(history, user_text):
+        confession_probability = min(confession_probability, prior_confession_probability + 0.02)
+
+    return (
+        pressure_delta,
+        clamp01(confession_probability),
+        sorted(cumulative_evidence_ids),
+        sorted(cumulative_contradiction_ids),
+    )
 
 # =========================================================
 # STT
@@ -1001,6 +1107,99 @@ def _is_overly_evasive_answer(text: str) -> bool:
         norm_for_match(pattern) in t_match for pattern in evasive_patterns
     )
 
+def _build_turn_pressure_context_v2(
+    case_data: Optional[Dict[str, Any]],
+    interrogation_signal: Optional[Dict[str, Any]],
+) -> str:
+    if not case_data or not interrogation_signal:
+        return ""
+
+    current_turn = interrogation_signal.get("current_turn", {}) or {}
+    pressure_level = str(current_turn.get("pressure_level", "none")).strip().lower()
+    current_evidence_ids = current_turn.get("referenced_evidence_ids", []) or []
+    current_contradiction_ids = current_turn.get("established_contradiction_ids", []) or []
+
+    evidence_map = {
+        str(e.get("id", "")).strip(): e
+        for e in _case_evidences(case_data)
+        if e.get("id")
+    }
+    contradiction_map = {
+        str(c.get("id", "")).strip(): c
+        for c in _case_contradictions(case_data)
+        if c.get("id")
+    }
+
+    evidence_lines = []
+    for evidence_id in current_evidence_ids:
+        evidence = evidence_map.get(str(evidence_id).strip())
+        if evidence:
+            evidence_lines.append(
+                f"- {evidence.get('name', evidence_id)}: {evidence.get('description', '')}".strip()
+            )
+
+    contradiction_lines = []
+    for contradiction_id in current_contradiction_ids:
+        contradiction = contradiction_map.get(str(contradiction_id).strip())
+        if contradiction:
+            contradiction_lines.append(f"- {contradiction.get('description', '')}".strip())
+
+    directives = []
+    if current_contradiction_ids:
+        directives.append(
+            "- Address the contradiction directly. Do not only deny and move on."
+        )
+    elif current_evidence_ids:
+        directives.append(
+            "- React to the evidence that was just mentioned. Do not dodge with a generic denial."
+        )
+
+    if pressure_level in {"medium", "high"}:
+        directives.append(
+            "- Give at least one concrete detail about time, place, or behavior."
+        )
+    if pressure_level == "high":
+        directives.append(
+            "- Let the story wobble a little. You may partially correct yourself, but do not fully confess."
+        )
+
+    if not evidence_lines and not contradiction_lines and not directives:
+        return ""
+
+    return (
+        f"\n[Pressure level this turn] {pressure_level}\n"
+        "[Evidence raised this turn]\n"
+        + ("\n".join(evidence_lines) if evidence_lines else "(none)")
+        + "\n[Contradictions raised this turn]\n"
+        + ("\n".join(contradiction_lines) if contradiction_lines else "(none)")
+        + "\n[Response guidance]\n"
+        + ("\n".join(directives) if directives else "(none)")
+    )
+
+def _build_suspect_answer_system_prompt() -> str:
+    return (
+        "You are a suspect being interrogated by a detective.\n"
+        "Reply in natural spoken Korean.\n"
+        "Use 1 or 2 short sentences, at most 3.\n"
+        "Do not sound like a narrator, a report, or an AI assistant.\n"
+        "Do not use stiff literary wording or repetitive honorifics every turn.\n"
+        "If the detective's pressure is weak, deny briefly or deflect.\n"
+        "If evidence or a contradiction is raised, react to that point directly.\n"
+        "If pressure is strong, let your story shake and reveal a small concrete fact.\n"
+        "Do not mention evidence the detective has not brought up yet.\n"
+        "Do not fully confess unless the confession trigger is reached.\n"
+    )
+
+def _build_confession_system_prompt() -> str:
+    return (
+        "You are a suspect finally breaking under interrogation.\n"
+        "Reply in natural spoken Korean.\n"
+        "Use 1 or 2 short sentences, at most 3.\n"
+        "Do not sound theatrical, poetic, or robotic.\n"
+        "Confess the crime directly instead of circling around it.\n"
+        "You may include guilt, fear, regret, or resignation, but keep it grounded.\n"
+    )
+
 def llm_suspect_answer(
     case_context: str,
     case_data: Optional[Dict[str, Any]],
@@ -1027,6 +1226,7 @@ def llm_suspect_answer(
         "- 자백 트리거가 아니면 범행을 완전 자백하지 말 것.\n"
     )
 
+    system = _build_suspect_answer_system_prompt()
     recent = history[-4:] if isinstance(history, list) else []
     hist_lines = []
     detective_mentions = []
@@ -1045,7 +1245,7 @@ def llm_suspect_answer(
 
     allowed_evidence_words = _collect_allowed_evidence_words(case_data, detective_mentions)
     all_evidence_words = _all_evidence_words(case_data)
-    turn_pressure_context = _build_turn_pressure_context(case_data, interrogation_signal)
+    turn_pressure_context = _build_turn_pressure_context_v2(case_data, interrogation_signal)
     current_turn = (interrogation_signal or {}).get("current_turn", {}) if interrogation_signal else {}
     pressure_level = str(current_turn.get("pressure_level", "none")).strip().lower()
     has_current_contradiction = bool(current_turn.get("established_contradiction_ids", []))
@@ -1227,6 +1427,8 @@ async def interrogation_qna(
         if case_id:
             case_data = CASE_CACHE.get(case_id)
         case_context = build_case_context(case_data)
+        prior_progress = _get_progress_state(case_id, history)
+        prior_confession_probability = float(prior_progress["confession_probability"])
 
         if not final_user_text:
             msg = "…잘 안 들립니다. 다시 말씀해 주세요."
@@ -1236,7 +1438,7 @@ async def interrogation_qna(
                     "user_text": "",
                     "suspect_text": msg,
                     "pressure_delta": 0.0,
-                    "confession_probability": float(calc_pressure_and_prob_v2(case_data, history, "")[1]),
+                    "confession_probability": prior_confession_probability,
                     "confession_triggered": False,
                     "audio_wav_b64": await tts_to_b64(msg),
                 },
@@ -1250,7 +1452,7 @@ async def interrogation_qna(
                     "user_text": final_user_text,
                     "suspect_text": msg,
                     "pressure_delta": 0.0,
-                    "confession_probability": float(calc_pressure_and_prob_v2(case_data, history, "")[1]),
+                    "confession_probability": prior_confession_probability,
                     "confession_triggered": False,
                     "audio_wav_b64": await tts_to_b64(msg),
                 },
@@ -1259,11 +1461,12 @@ async def interrogation_qna(
         # 2) case load (cache 우선)
         # 3) calc pressure/prob
         interrogation_signal = llm_evaluate_interrogation(case_data, history, final_user_text)
-        pressure_delta, confession_probability = calc_pressure_and_prob_v2(
+        pressure_delta, confession_probability, cumulative_evidence_ids, cumulative_contradiction_ids = calc_pressure_and_prob_v2(
             case_data,
             history,
             final_user_text,
             interrogation_signal,
+            prior_progress,
         )
         confession_triggered = confession_probability >= 0.85
 
@@ -1284,6 +1487,19 @@ async def interrogation_qna(
 
         # 5) TTS
         wav_b64 = await tts_to_b64(suspect_text)
+        updated_history = history + [
+            {
+                "user_text": final_user_text,
+                "suspect_text": suspect_text,
+            }
+        ]
+        _store_progress_state(
+            case_id,
+            updated_history,
+            confession_probability,
+            cumulative_evidence_ids,
+            cumulative_contradiction_ids,
+        )
 
         return JSONResponse(
             status_code=200,
