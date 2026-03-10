@@ -1,0 +1,26 @@
+name: Deploy to Cloudtype
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: cloudtype-main-deploy
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Cloudtype deployment
+        env:
+          CLOUDTYPE_API_KEY: ${{ secrets.CLOUDTYPE_API_KEY }}
+        run: |
+          test -n "$CLOUDTYPE_API_KEY"
+          curl --fail-with-body --silent --show-error \
+            -X POST "https://api.cloudtype.io/webhooks/deploy" \
+            -H "Authorization: Bearer ${CLOUDTYPE_API_KEY}" \
+            -H "Content-Type: application/json" \
+            --data '{"project":"unserver","app":"unserver","stage":"main"}'
