@@ -23,4 +23,4 @@ jobs:
             -X POST "https://api.cloudtype.io/webhooks/deploy" \
             -H "Authorization: Bearer ${CLOUDTYPE_API_KEY}" \
             -H "Content-Type: application/json" \
-            --data '{"project":"unserver","app":"unserver","stage":"main"}'
+            --data '{"project":"unserver","stage":"main"}'
