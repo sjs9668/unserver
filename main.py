@@ -913,12 +913,101 @@ def _contains_banned_evidence(text: str, all_words: List[str], allowed_words: Li
             return True
     return False
 
+def _build_turn_pressure_context(
+    case_data: Optional[Dict[str, Any]],
+    interrogation_signal: Optional[Dict[str, Any]],
+) -> str:
+    if not case_data or not interrogation_signal:
+        return ""
+
+    current_turn = interrogation_signal.get("current_turn", {}) or {}
+    pressure_level = str(current_turn.get("pressure_level", "none")).strip().lower()
+    current_evidence_ids = current_turn.get("referenced_evidence_ids", []) or []
+    current_contradiction_ids = current_turn.get("established_contradiction_ids", []) or []
+
+    evidence_map = {
+        str(e.get("id", "")).strip(): e
+        for e in _case_evidences(case_data)
+        if e.get("id")
+    }
+    contradiction_map = {
+        str(c.get("id", "")).strip(): c
+        for c in _case_contradictions(case_data)
+        if c.get("id")
+    }
+
+    evidence_lines = []
+    for evidence_id in current_evidence_ids:
+        evidence = evidence_map.get(str(evidence_id).strip())
+        if evidence:
+            evidence_lines.append(
+                f"- {evidence.get('name', evidence_id)}: {evidence.get('description', '')}".strip()
+            )
+
+    contradiction_lines = []
+    for contradiction_id in current_contradiction_ids:
+        contradiction = contradiction_map.get(str(contradiction_id).strip())
+        if contradiction:
+            contradiction_lines.append(f"- {contradiction.get('description', '')}".strip())
+
+    directives = []
+    if current_contradiction_ids:
+        directives.append(
+            "- 이번 답변에서는 방금 지적된 모순을 직접 다뤄라. 짧은 부인이나 말 돌리기는 금지다."
+        )
+    elif current_evidence_ids:
+        directives.append(
+            "- 이번 답변에서는 방금 언급된 증거에 직접 반응하라. 일반론으로만 회피하지 마라."
+        )
+
+    if pressure_level in {"medium", "high"}:
+        directives.append(
+            "- 이번 답변에서는 시간, 장소, 행동 중 최소 하나를 구체적으로 말해라."
+        )
+    if pressure_level == "high":
+        directives.append(
+            "- 완전 자백은 아니어도 진술 일부 수정, 사실 일부 인정, 감정 흔들림이 자연스럽다."
+        )
+
+    if not evidence_lines and not contradiction_lines and not directives:
+        return ""
+
+    return (
+        f"\n[이번 턴 압박 수준] {pressure_level}\n"
+        "[이번 턴에 형사가 꺼낸 증거]\n"
+        + ("\n".join(evidence_lines) if evidence_lines else "(없음)")
+        + "\n[이번 턴에 형사가 찌른 모순]\n"
+        + ("\n".join(contradiction_lines) if contradiction_lines else "(없음)")
+        + "\n[이번 답변 지침]\n"
+        + ("\n".join(directives) if directives else "(없음)")
+    )
+
+def _is_overly_evasive_answer(text: str) -> bool:
+    t = norm(text)
+    if not t:
+        return True
+
+    t_match = norm_for_match(t)
+    evasive_patterns = [
+        "모르겠습니다",
+        "아닙니다",
+        "기억 안 납니다",
+        "잘 모르겠습니다",
+        "할 말 없습니다",
+        "그건 아닙니다",
+    ]
+
+    return len(t) <= 28 and any(
+        norm_for_match(pattern) in t_match for pattern in evasive_patterns
+    )
+
 def llm_suspect_answer(
     case_context: str,
     case_data: Optional[Dict[str, Any]],
     history: List[Dict[str, Any]],
     user_text: str,
-    confession_probability: float
+    confession_probability: float,
+    interrogation_signal: Optional[Dict[str, Any]] = None,
 ) -> str:
     """
     용의자 답변 생성(2~3주차)
@@ -956,8 +1045,17 @@ def llm_suspect_answer(
 
     allowed_evidence_words = _collect_allowed_evidence_words(case_data, detective_mentions)
     all_evidence_words = _all_evidence_words(case_data)
-
+    turn_pressure_context = _build_turn_pressure_context(case_data, interrogation_signal)
+    current_turn = (interrogation_signal or {}).get("current_turn", {}) if interrogation_signal else {}
+    pressure_level = str(current_turn.get("pressure_level", "none")).strip().lower()
+    has_current_contradiction = bool(current_turn.get("established_contradiction_ids", []))
     extra_guard = ""
+    if turn_pressure_context:
+        extra_guard += turn_pressure_context
+    if has_current_contradiction:
+        extra_guard += "\n- 방금 지적된 모순을 직접 해명하거나 진술 일부를 수정해라. 짧은 부인만 하지 마라."
+    elif pressure_level in {"medium", "high"}:
+        extra_guard += "\n- 이번에는 질문을 피해 가지 말고 구체적인 사실 하나는 내놓아라."
     if is_too_ambiguous(user_text):
         extra_guard += "\n- 질문이 모호하면 무슨 뜻인지 되묻고 질문을 구체화하게 유도해라."
     if detect_repeat(history, user_text):
@@ -982,6 +1080,9 @@ def llm_suspect_answer(
         max_output_tokens=220,
     )
     out = trim_to_1_3_sentences((resp.output_text or "").strip())
+    should_retry_for_specificity = (
+        pressure_level in {"medium", "high"} or has_current_contradiction
+    ) and _is_overly_evasive_answer(out)
 
     # 금지 증거 스포가 나오면 1회 재시도
     if _contains_banned_evidence(out, all_evidence_words, allowed_evidence_words):
@@ -999,6 +1100,22 @@ def llm_suspect_answer(
             max_output_tokens=200,
         )
         out = trim_to_1_3_sentences((resp2.output_text or "").strip())
+
+    if should_retry_for_specificity and _is_overly_evasive_answer(out):
+        retry_user = (
+            user +
+            "\n\n[경고] 방금 답변은 너무 회피적이다. "
+            "이번에는 방금 제시된 증거나 모순에 직접 반응하고, 시간, 장소, 행동 중 하나는 구체적으로 말해라."
+        )
+        resp3 = client.responses.create(
+            model=LLM_MODEL,
+            input=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": retry_user},
+            ],
+            max_output_tokens=200,
+        )
+        out = trim_to_1_3_sentences((resp3.output_text or "").strip())
 
     return out or "…모릅니다. 정말 집에 있었습니다."
 
@@ -1154,7 +1271,14 @@ async def interrogation_qna(
         if confession_triggered:
             suspect_text = llm_confession(case_context, history, final_user_text)
         else:
-            suspect_text = llm_suspect_answer(case_context, case_data, history, final_user_text, confession_probability)
+            suspect_text = llm_suspect_answer(
+                case_context,
+                case_data,
+                history,
+                final_user_text,
+                confession_probability,
+                interrogation_signal,
+            )
 
         suspect_text = trim_to_1_3_sentences(suspect_text)
 
