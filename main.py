@@ -28,11 +28,18 @@ def load_env(path: str = ".env") -> None:
 
 load_env()
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
-if not OPENAI_API_KEY:
-    raise RuntimeError("OPENAI_API_KEY is missing in .env (OPENAI_API_KEY=...)")
+_openai_client: Optional[OpenAI] = None
 
-client = OpenAI(api_key=OPENAI_API_KEY)
+def get_openai_client() -> OpenAI:
+    global _openai_client
+
+    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY is missing")
+
+    if _openai_client is None:
+        _openai_client = OpenAI(api_key=api_key)
+    return _openai_client
 
 # =========================================================
 # MODEL CONFIG
@@ -50,7 +57,7 @@ app = FastAPI()
 
 @app.get("/health")
 async def health():
-    return {"ok": True}
+    return {"ok": True, "openai_configured": bool(os.getenv("OPENAI_API_KEY", "").strip())}
 
 # =========================================================
 # IN-MEMORY STORE (서버 재시작하면 초기화)
@@ -252,6 +259,7 @@ def stt_transcribe(audio_bytes: bytes) -> str:
     2) 포맷/호환 에러면 whisper-1로 폴백
     """
     def _call(model_name: str) -> str:
+        client = get_openai_client()
         bio = BytesIO(audio_bytes)
         bio.name = "user.wav"
         res = client.audio.transcriptions.create(
@@ -278,6 +286,7 @@ async def tts_to_b64(text: str) -> str:
     if not text:
         return ""
 
+    client = get_openai_client()
     speech = client.audio.speech.create(
         model=TTS_MODEL,
         voice=TTS_VOICE,
@@ -410,6 +419,7 @@ def llm_generate_case() -> Dict[str, Any]:
         "\n이제 새 사건 JSON을 출력하라.\n"
     )
 
+    client = get_openai_client()
     resp = client.responses.create(
         model=LLM_MODEL,
         input=[
@@ -553,6 +563,7 @@ def llm_suspect_answer(
         "용의자의 답변만 출력하라."
     )
 
+    client = get_openai_client()
     resp = client.responses.create(
         model=LLM_MODEL,
         input=[
@@ -583,6 +594,7 @@ def llm_suspect_answer(
     return out or "…모릅니다. 정말 집에 있었습니다."
 
 def llm_confession(case_context: str, history: List[Dict[str, Any]], user_text: str) -> str:
+    client = get_openai_client()
     system = (
         "너는 심문실에 앉아있는 '용의자'다.\n"
         "유저는 담당 형사다.\n"
