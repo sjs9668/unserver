@@ -16,7 +16,7 @@ jobs:
       - name: Deploy
         uses: cloudtype-github-actions/deploy@v1
         with:
-          token: ${{ secrets.CLOUDTYPE_TOKEN }}
+          token: ${{ secrets.CLOUDTYPE_API_KEY }}
           project: sjusju9868/unserver
           stage: main
           yaml: |
