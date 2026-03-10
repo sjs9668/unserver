@@ -1,4 +1,4 @@
-name: Deploy to Cloudtype
+name: Deploy to cloudtype
 
 on:
   push:
@@ -6,21 +6,41 @@ on:
       - main
   workflow_dispatch:
 
-concurrency:
-  group: cloudtype-main-deploy
-  cancel-in-progress: true
-
 jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - name: Trigger Cloudtype deployment
-        env:
-          CLOUDTYPE_API_KEY: ${{ secrets.CLOUDTYPE_API_KEY }}
-        run: |
-          test -n "$CLOUDTYPE_API_KEY"
-          curl --fail-with-body --silent --show-error \
-            -X POST "https://api.cloudtype.io/webhooks/deploy" \
-            -H "Authorization: Bearer ${CLOUDTYPE_API_KEY}" \
-            -H "Content-Type: application/json" \
-            --data '{"project":"sjusju9868/unserver","app":"unserver","stage":"main"}'
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Connect deploy key
+        uses: cloudtype-github-actions/connect@v1
+        with:
+          token: ${{ secrets.CLOUDTYPE_TOKEN }}
+          ghtoken: ${{ secrets.GHP_TOKEN }}
+
+      - name: Deploy
+        uses: cloudtype-github-actions/deploy@v1
+        with:
+          token: ${{ secrets.CLOUDTYPE_TOKEN }}
+          project: sjusju9868/unserver
+          stage: main
+          yaml: |
+            name: unserver
+            app: python@3.9
+            options:
+              env:
+                - name: OPENAI_API_KEY
+                  value: ${{ secrets.OPENAI_API_KEY }}
+              ports: 8000
+              start: uvicorn main:app --host=0.0.0.0 --port=8000
+              healthz: /health
+              install: pip install -r requirements.txt
+              buildenv:
+                - name: OPENAI_API_KEY
+                  value: ${{ secrets.OPENAI_API_KEY }}
+            context:
+              git:
+                url: git@github.com:${{ github.repository }}.git
+                ref: ${{ github.ref }}
+              preset: python-fastapi
