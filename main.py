@@ -58,6 +58,12 @@ async def health():
 # =========================================================
 CASE_CACHE: Dict[str, Dict[str, Any]] = {}
 INTERROGATION_PROGRESS_CACHE: Dict[str, Dict[str, Dict[str, Any]]] = {}
+RUNTIME_STORE_DIR = Path(__file__).parent / "runtime_store"
+CASE_STORE_DIR = RUNTIME_STORE_DIR / "cases"
+PROGRESS_STORE_DIR = RUNTIME_STORE_DIR / "interrogation_progress"
+
+for _store_dir in (CASE_STORE_DIR, PROGRESS_STORE_DIR):
+    _store_dir.mkdir(parents=True, exist_ok=True)
 
 # =========================================================
 # EXAMPLE CASE (템플릿 예시로만 사용)
@@ -78,6 +84,106 @@ def safe_json_loads(s: str, default: Any):
         return json.loads(s)
     except Exception:
         return default
+
+def read_json_file(path: Path, default: Any):
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return default
+
+def atomic_write_json(path: Path, payload: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_suffix(f"{path.suffix}.{uuid.uuid4().hex}.tmp")
+    temp_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    temp_path.replace(path)
+
+def store_key(value: str) -> str:
+    raw = (value or "").strip()
+    safe = re.sub(r"[^A-Za-z0-9_-]+", "_", raw).strip("_")[:80] or "item"
+    digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12]
+    return f"{safe}-{digest}"
+
+def case_store_path(case_id: str) -> Path:
+    return CASE_STORE_DIR / f"{store_key(case_id)}.json"
+
+def progress_store_path(case_id: str) -> Path:
+    return PROGRESS_STORE_DIR / f"{store_key(case_id)}.json"
+
+def persist_case(case_data: Dict[str, Any]) -> None:
+    case_id = norm(case_data.get("case_id", ""))
+    if not case_id:
+        return
+    atomic_write_json(case_store_path(case_id), case_data)
+
+def load_case(case_id: str) -> Optional[Dict[str, Any]]:
+    cid = norm(case_id)
+    if not cid:
+        return None
+
+    cached = CASE_CACHE.get(cid)
+    if isinstance(cached, dict):
+        return cached
+
+    stored = read_json_file(case_store_path(cid), None)
+    if not isinstance(stored, dict):
+        return None
+    if norm(stored.get("case_id", "")) != cid:
+        return None
+
+    CASE_CACHE[cid] = stored
+    print(f"[CaseStore] Rehydrated case_id='{cid}' from disk")
+    return stored
+
+def normalize_progress_cache(blob: Any) -> Dict[str, Dict[str, Any]]:
+    if not isinstance(blob, dict):
+        return {}
+
+    normalized: Dict[str, Dict[str, Any]] = {}
+    for history_key, state in blob.items():
+        if not isinstance(history_key, str) or not isinstance(state, dict):
+            continue
+        normalized[history_key] = {
+            "confession_probability": clamp01(state.get("confession_probability", 0.0)),
+            "referenced_evidence_ids": sorted(
+                {str(eid).strip() for eid in (state.get("referenced_evidence_ids", []) or []) if str(eid).strip()}
+            ),
+            "established_contradiction_ids": sorted(
+                {
+                    str(cid).strip()
+                    for cid in (state.get("established_contradiction_ids", []) or [])
+                    if str(cid).strip()
+                }
+            ),
+        }
+    return normalized
+
+def load_progress_cache(case_id: str) -> Dict[str, Dict[str, Any]]:
+    cid = norm(case_id)
+    if not cid:
+        return {}
+
+    cached = INTERROGATION_PROGRESS_CACHE.get(cid)
+    if isinstance(cached, dict):
+        return cached
+
+    restored = normalize_progress_cache(read_json_file(progress_store_path(cid), {}))
+    if restored:
+        INTERROGATION_PROGRESS_CACHE[cid] = restored
+        print(f"[ProgressStore] Rehydrated case_id='{cid}' with {len(restored)} states")
+    return restored
+
+def persist_progress_cache(case_id: str) -> None:
+    cid = norm(case_id)
+    if not cid:
+        return
+
+    progress_by_history = normalize_progress_cache(INTERROGATION_PROGRESS_CACHE.get(cid, {}))
+    if not progress_by_history:
+        return
+    atomic_write_json(progress_store_path(cid), progress_by_history)
 
 def norm(s: str) -> str:
     s = (s or "").strip()
@@ -550,7 +656,7 @@ def _get_progress_state(case_id: str, history: List[Dict[str, Any]]) -> Dict[str
     if not case_id:
         return _empty_progress_state()
 
-    progress_by_history = INTERROGATION_PROGRESS_CACHE.get(case_id) or {}
+    progress_by_history = load_progress_cache(case_id)
     state = progress_by_history.get(_history_progress_key(history))
     if not isinstance(state, dict):
         return _empty_progress_state()
@@ -573,7 +679,7 @@ def _store_progress_state(
     if not case_id:
         return
 
-    progress_by_history = INTERROGATION_PROGRESS_CACHE.setdefault(case_id, {})
+    progress_by_history = load_progress_cache(case_id)
     progress_by_history[_history_progress_key(history)] = {
         "confession_probability": clamp01(confession_probability),
         "referenced_evidence_ids": sorted(
@@ -587,6 +693,9 @@ def _store_progress_state(
     while len(progress_by_history) > 64:
         oldest_key = next(iter(progress_by_history))
         progress_by_history.pop(oldest_key, None)
+
+    INTERROGATION_PROGRESS_CACHE[case_id] = progress_by_history
+    persist_progress_cache(case_id)
 
 def build_case_context(case_data: Optional[Dict[str, Any]]) -> str:
     """
@@ -901,6 +1010,72 @@ CASE_JSON_SCHEMA = {
         "contradictions",
     ],
 }
+
+def coerce_case_payload(case_blob: Any, fallback_case_id: str = "") -> Optional[Dict[str, Any]]:
+    if not isinstance(case_blob, dict):
+        return None
+
+    overview = case_blob.get("overview", {}) if isinstance(case_blob.get("overview"), dict) else {}
+    suspect = case_blob.get("suspect", {}) if isinstance(case_blob.get("suspect"), dict) else {}
+    evidences = case_blob.get("evidences", []) if isinstance(case_blob.get("evidences"), list) else []
+    contradictions = case_blob.get("contradictions", []) if isinstance(case_blob.get("contradictions"), list) else []
+
+    def to_int(value: Any, default: int = 0) -> int:
+        try:
+            return int(value)
+        except Exception:
+            return default
+
+    normalized_evidences: List[Dict[str, str]] = []
+    for evidence in evidences:
+        if not isinstance(evidence, dict):
+            continue
+        normalized_evidences.append(
+            {
+                "id": norm(evidence.get("id", "")),
+                "name": norm(evidence.get("name", "")),
+                "description": norm(evidence.get("description", "")),
+            }
+        )
+
+    normalized_contradictions: List[Dict[str, Any]] = []
+    for contradiction in contradictions:
+        if not isinstance(contradiction, dict):
+            continue
+        related_evidence = contradiction.get("related_evidence", [])
+        if not isinstance(related_evidence, list):
+            related_evidence = []
+        normalized_contradictions.append(
+            {
+                "id": norm(contradiction.get("id", "")),
+                "description": norm(contradiction.get("description", "")),
+                "related_evidence": uniq_strings([str(item).strip() for item in related_evidence]),
+            }
+        )
+
+    case_id = norm(case_blob.get("case_id", "")) or norm(fallback_case_id)
+    if not case_id:
+        return None
+
+    return {
+        "case_id": case_id,
+        "overview": {
+            "time": norm(overview.get("time", "")),
+            "place": norm(overview.get("place", "")),
+            "type": norm(overview.get("type", "")),
+        },
+        "motive": norm(case_blob.get("motive", "")),
+        "crime_flow": norm(case_blob.get("crime_flow", "")),
+        "suspect": {
+            "name": norm(suspect.get("name", "")),
+            "age": to_int(suspect.get("age", 0)),
+            "job": norm(suspect.get("job", "")),
+            "relation": norm(suspect.get("relation", "")),
+        },
+        "false_statement": norm(case_blob.get("false_statement", "")),
+        "evidences": normalized_evidences,
+        "contradictions": normalized_contradictions,
+    }
 
 def llm_generate_case() -> Dict[str, Any]:
     """
@@ -1375,11 +1550,12 @@ async def case_generate():
 
         # case_id 고유 강제 (중복 방지)
         cid = (case_data.get("case_id", "") or "").strip()
-        if not cid or cid in CASE_CACHE:
+        if not cid or cid in CASE_CACHE or case_store_path(cid).exists():
             cid = f"case_{uuid.uuid4().hex[:8]}"
             case_data["case_id"] = cid
 
         CASE_CACHE[cid] = case_data
+        persist_case(case_data)
         return JSONResponse(status_code=200, content={"case": case_data})
 
     except Exception as e:
@@ -1391,6 +1567,7 @@ async def interrogation_qna(
     file: Optional[UploadFile] = File(None),
     user_text: str = Form(""),
     case_id: str = Form(""),
+    case_json: str = Form(""),
     history_json: str = Form("[]"),
 ):
     """
@@ -1423,9 +1600,39 @@ async def interrogation_qna(
                 final_user_text = stt_transcribe(audio_bytes)
         final_user_text = norm(final_user_text)
 
+        case_id = norm(case_id)
         case_data = None
-        if case_id:
-            case_data = CASE_CACHE.get(case_id)
+        client_case_payload = safe_json_loads(case_json, None) if case_json.strip() else None
+        client_case_data = coerce_case_payload(client_case_payload, case_id)
+        if client_case_data:
+            payload_case_id = norm(client_case_data.get("case_id", ""))
+            if case_id and payload_case_id != case_id:
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "error": "case_id_mismatch",
+                        "message": "case_id and case_json.case_id do not match.",
+                        "case_id": case_id,
+                        "case_json_case_id": payload_case_id,
+                    },
+                )
+            case_id = payload_case_id
+            case_data = client_case_data
+            CASE_CACHE[case_id] = case_data
+            persist_case(case_data)
+            print(f"[CaseStore] Refreshed case_id='{case_id}' from client case_json")
+        elif case_id:
+            case_data = load_case(case_id)
+        if case_id and not case_data:
+            print(f"[CaseStore] Missing case_id='{case_id}' in cache and disk")
+            return JSONResponse(
+                status_code=404,
+                content={
+                    "error": "case_not_found",
+                    "message": "Unknown case_id. The server no longer has the generated case for this session.",
+                    "case_id": case_id,
+                },
+            )
         case_context = build_case_context(case_data)
         prior_progress = _get_progress_state(case_id, history)
         prior_confession_probability = float(prior_progress["confession_probability"])
