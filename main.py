@@ -4,11 +4,13 @@ import base64
 import traceback
 import re
 import hashlib
+import random
 from io import BytesIO
 from typing import Any, Dict, List, Optional, Tuple
 
 from pathlib import Path
 import uuid
+from collections import deque
 
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.responses import JSONResponse
@@ -75,6 +77,102 @@ if EXAMPLE_CASE_PATH.exists():
     EXAMPLE_CASE_TEXT = EXAMPLE_CASE_PATH.read_text(encoding="utf-8").strip()
 else:
     EXAMPLE_CASE_TEXT = ""
+
+CASE_VARIANT_BLUEPRINTS: List[Dict[str, Any]] = [
+    {
+        "label": "절도 폭행",
+        "type_hint": "절도 후 폭행",
+        "place_hint": "원룸 건물 복도, 오피스텔 주차장, 편의점 창고",
+        "motive_hint": "생활고, 빚, 들킬까 봐 충동적으로 폭행",
+        "allow_fire": False,
+    },
+    {
+        "label": "독살 미수",
+        "type_hint": "독살 미수",
+        "place_hint": "식당 주방, 사무실 탕비실, 가족 식사 자리",
+        "motive_hint": "유산, 원한, 관계 파탄에 따른 계획적 범행",
+        "allow_fire": False,
+    },
+    {
+        "label": "유괴 감금",
+        "type_hint": "유괴 및 감금",
+        "place_hint": "모텔, 외곽 창고, 지하 작업실",
+        "motive_hint": "금전 요구, 보복, 비밀을 막기 위한 통제",
+        "allow_fire": False,
+    },
+    {
+        "label": "횡령 은폐",
+        "type_hint": "횡령 및 증거 은닉",
+        "place_hint": "중소기업 사무실, 회계팀, 창고 사무동",
+        "motive_hint": "투자 실패, 도박 빚, 장부 조작 은폐",
+        "allow_fire": False,
+    },
+    {
+        "label": "뺑소니 은폐",
+        "type_hint": "뺑소니 및 은폐",
+        "place_hint": "골목길, 공장 진입로, 새벽 도로",
+        "motive_hint": "음주 사실 은폐, 면허 문제, 두려움",
+        "allow_fire": False,
+    },
+    {
+        "label": "협박 갈취",
+        "type_hint": "협박 및 갈취",
+        "place_hint": "노래방, 학원 사무실, 골목 흡연 구역",
+        "motive_hint": "돈 요구, 약점 이용, 지위 관계 악용",
+        "allow_fire": False,
+    },
+    {
+        "label": "밀수 운반",
+        "type_hint": "밀수 및 불법 운반",
+        "place_hint": "항구 창고, 냉동 탑차, 물류센터 하역장",
+        "motive_hint": "고수익 제안, 빚 상환, 조직 압박",
+        "allow_fire": False,
+    },
+    {
+        "label": "산업 스파이",
+        "type_hint": "산업기밀 유출",
+        "place_hint": "연구실, 스타트업 사무실, 공장 설비실",
+        "motive_hint": "이직 대가, 경쟁사 거래, 승진 불만",
+        "allow_fire": False,
+    },
+    {
+        "label": "스토킹 침입",
+        "type_hint": "스토킹 및 주거침입",
+        "place_hint": "빌라 복도, 피해자 집 앞, 지하주차장",
+        "motive_hint": "집착, 거절에 대한 분노, 관계 망상",
+        "allow_fire": False,
+    },
+    {
+        "label": "보험 사기",
+        "type_hint": "보험 사기",
+        "place_hint": "병원, 공사 현장, 차량 사고 현장",
+        "motive_hint": "보험금 편취, 채무 해결, 공모 은폐",
+        "allow_fire": False,
+    },
+    {
+        "label": "살인",
+        "type_hint": "살인",
+        "place_hint": "아파트 내부, 외딴 골목, 공장 사무실, 창고",
+        "motive_hint": "원한, 금전 분쟁, 관계 파탄, 충동적 격분",
+        "allow_fire": False,
+    },
+    {
+        "label": "방화",
+        "type_hint": "방화",
+        "place_hint": "상가 창고, 폐건물, 외곽 창고",
+        "motive_hint": "보험금, 보복, 증거 인멸",
+        "allow_fire": True,
+    },
+    {
+        "label": "살인 교사",
+        "type_hint": "살인 교사 미수",
+        "place_hint": "사무실, 가족 모임, 거래 현장",
+        "motive_hint": "유산, 사업권 분쟁, 관계 청산",
+        "allow_fire": False,
+    },
+]
+RECENT_CASE_TYPE_HISTORY: deque[str] = deque(maxlen=5)
+FIRE_CASE_MARKERS = ("방화", "화재", "불")
 
 # =========================================================
 # UTILS
@@ -1077,6 +1175,41 @@ def coerce_case_payload(case_blob: Any, fallback_case_id: str = "") -> Optional[
         "contradictions": normalized_contradictions,
     }
 
+def _case_type_key(text: str) -> str:
+    return norm_for_match(text)
+
+def _is_fire_case_type(text: str) -> bool:
+    normalized = norm(text)
+    return any(marker in normalized for marker in FIRE_CASE_MARKERS)
+
+def _recent_case_type_keys() -> set:
+    return {_case_type_key(case_type) for case_type in RECENT_CASE_TYPE_HISTORY if case_type}
+
+def _pick_case_blueprint(excluded_labels: Optional[set] = None) -> Dict[str, Any]:
+    excluded_labels = excluded_labels or set()
+    recent_keys = _recent_case_type_keys()
+    eligible = [
+        blueprint
+        for blueprint in CASE_VARIANT_BLUEPRINTS
+        if blueprint["label"] not in excluded_labels
+        and _case_type_key(blueprint["type_hint"]) not in recent_keys
+    ]
+    if not eligible:
+        eligible = [
+            blueprint
+            for blueprint in CASE_VARIANT_BLUEPRINTS
+            if blueprint["label"] not in excluded_labels
+        ]
+    if not eligible:
+        eligible = CASE_VARIANT_BLUEPRINTS
+    return random.choice(eligible)
+
+def _register_generated_case_type(case_data: Dict[str, Any]) -> None:
+    overview = case_data.get("overview", {}) if isinstance(case_data, dict) else {}
+    case_type = norm(overview.get("type", "")) if isinstance(overview, dict) else ""
+    if case_type:
+        RECENT_CASE_TYPE_HISTORY.append(case_type)
+
 def llm_generate_case() -> Dict[str, Any]:
     """
     seed 없이, case_interrogation_01.json 예시를 보고 자동 생성.
@@ -1132,6 +1265,97 @@ def llm_generate_case() -> Dict[str, Any]:
 
     text = (resp.output_text or "").strip()
     return json.loads(text)
+
+# Override the legacy generator with a diversity-aware version.
+def llm_generate_case() -> Dict[str, Any]:
+    """
+    Generate a structured interrogation case while actively varying crime type.
+    """
+    system = (
+        "You generate structured interrogation-game cases.\n"
+        "Output must be valid JSON matching the provided schema.\n"
+        "The example JSON is only a schema/style reference, not a crime-type template.\n"
+        "Vary the crime type, setting, suspect relationship, and motive across generations.\n"
+        "Do not keep generating arson or fire cases unless the target profile explicitly asks for one.\n"
+        "evidences must contain 2 to 6 items.\n"
+        "contradictions must contain 2 to 5 items.\n"
+        "Each contradiction.related_evidence should reference at least one evidence id when possible.\n"
+        "false_statement should sound plausible at first but collapse under evidence or contradiction pressure.\n"
+        "crime_flow is the hidden ground truth summary.\n"
+        "case_id must start with 'case_'.\n"
+    )
+
+    example_block = (
+        f"\n[Example case JSON]\n{EXAMPLE_CASE_TEXT}\n"
+        if EXAMPLE_CASE_TEXT else
+        "\n[Example case JSON]\n(No example file available.)\n"
+    )
+    recent_types = list(RECENT_CASE_TYPE_HISTORY)
+    tried_labels = set()
+    last_case_data: Optional[Dict[str, Any]] = None
+
+    for _attempt in range(3):
+        blueprint = _pick_case_blueprint(tried_labels)
+        tried_labels.add(blueprint["label"])
+        recent_types_text = ", ".join(recent_types) if recent_types else "(none)"
+        fire_rule = (
+            "Fire or arson is allowed for this run."
+            if blueprint["allow_fire"]
+            else "Do not generate a fire, arson, blaze, or burn case for this run."
+        )
+        user = (
+            "Create one new interrogation case.\n"
+            "Important: do not copy the example's wording, facts, or crime type.\n"
+            "Make the case meaningfully different from recent generations.\n"
+            f"\n[Target crime profile]\n- Crime type: {blueprint['type_hint']}\n"
+            f"- Recommended setting: {blueprint['place_hint']}\n"
+            f"- Recommended motive direction: {blueprint['motive_hint']}\n"
+            f"\n[Recent crime types to avoid repeating]\n- {recent_types_text}\n"
+            f"\n[Hard diversity rule]\n- {fire_rule}\n"
+            "- overview.type must clearly match the target crime profile.\n"
+            + example_block +
+            "\nNow output only the new case JSON.\n"
+        )
+
+        resp = client.responses.create(
+            model=LLM_MODEL,
+            input=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            text={
+                "format": {
+                    "type": "json_schema",
+                    "name": "interrogation_case",
+                    "strict": True,
+                    "schema": CASE_JSON_SCHEMA,
+                }
+            },
+            max_output_tokens=4000,
+            store=False,
+            temperature=1.0,
+        )
+
+        text = (resp.output_text or "").strip()
+        case_data = json.loads(text)
+        last_case_data = case_data
+        generated_type = norm((case_data.get("overview", {}) or {}).get("type", ""))
+        generated_key = _case_type_key(generated_type)
+
+        should_retry = False
+        if generated_key and generated_key in _recent_case_type_keys():
+            should_retry = True
+        if not blueprint["allow_fire"] and _is_fire_case_type(generated_type):
+            should_retry = True
+
+        if not should_retry:
+            _register_generated_case_type(case_data)
+            return case_data
+
+    if last_case_data:
+        _register_generated_case_type(last_case_data)
+        return last_case_data
+    raise RuntimeError("Failed to generate case")
 
 
 # =========================================================
