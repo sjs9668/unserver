@@ -498,6 +498,23 @@ DIALOGUE_CONTRADICTION_SCHEMA = {
     ],
 }
 
+SUSPECT_REPLY_REVIEW_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "answers_question_directly": {"type": "boolean"},
+        "introduces_unrelated_details": {"type": "boolean"},
+        "evades_core_issue": {"type": "boolean"},
+        "reason": {"type": "string"},
+    },
+    "required": [
+        "answers_question_directly",
+        "introduces_unrelated_details",
+        "evades_core_issue",
+        "reason",
+    ],
+}
+
 def uniq_strings(values: List[str]) -> List[str]:
     out = []
     seen = set()
@@ -892,6 +909,77 @@ def apply_dialogue_contradiction_bonus(
         boosted_probability = 0.84
 
     return boosted_pressure, boosted_probability
+
+def _default_suspect_reply_review(
+    reason: str = "",
+    answers_question_directly: bool = True,
+) -> Dict[str, Any]:
+    return {
+        "answers_question_directly": bool(answers_question_directly),
+        "introduces_unrelated_details": False,
+        "evades_core_issue": False,
+        "reason": reason,
+    }
+
+def _sanitize_suspect_reply_review(raw_signal: Any) -> Dict[str, Any]:
+    if not isinstance(raw_signal, dict):
+        return _default_suspect_reply_review("")
+
+    return {
+        "answers_question_directly": bool(raw_signal.get("answers_question_directly", True)),
+        "introduces_unrelated_details": bool(raw_signal.get("introduces_unrelated_details", False)),
+        "evades_core_issue": bool(raw_signal.get("evades_core_issue", False)),
+        "reason": norm(raw_signal.get("reason", "")),
+    }
+
+def llm_review_suspect_reply(user_text: str, suspect_text: str) -> Dict[str, Any]:
+    detective_text = norm(user_text)
+    reply_text = norm(suspect_text)
+
+    if not reply_text:
+        return _default_suspect_reply_review(
+            "empty suspect reply",
+            answers_question_directly=False,
+        )
+
+    payload = {
+        "detective_text": detective_text,
+        "suspect_reply": reply_text,
+    }
+    system = (
+        "You review whether a suspect's reply directly answers a detective's latest question.\n"
+        "Return only JSON.\n"
+        "answers_question_directly is true only if the reply clearly addresses the literal question, accusation, or quoted statement.\n"
+        "introduces_unrelated_details is true if the reply brings in a new scene, meeting, time, place, person, or backstory that is not needed to answer the latest question.\n"
+        "evades_core_issue is true if the reply sidesteps the main point and answers something adjacent instead.\n"
+        "A short denial or reinterpretation is acceptable if it directly addresses the question first.\n"
+    )
+
+    try:
+        resp = client.responses.create(
+            model=LLM_MODEL,
+            input=[
+                {"role": "system", "content": system},
+                {
+                    "role": "user",
+                    "content": json.dumps(payload, ensure_ascii=False, indent=2),
+                },
+            ],
+            text={
+                "format": {
+                    "type": "json_schema",
+                    "name": "suspect_reply_review",
+                    "strict": True,
+                    "schema": SUSPECT_REPLY_REVIEW_SCHEMA,
+                }
+            },
+            max_output_tokens=200,
+            store=False,
+        )
+        raw_signal = safe_json_loads((resp.output_text or "").strip(), {})
+        return _sanitize_suspect_reply_review(raw_signal)
+    except Exception:
+        return _default_suspect_reply_review("suspect reply review failed")
 
 def _count_meaningful_turns(history: List[Dict[str, Any]], user_text: str) -> int:
     seen = set()
@@ -1776,6 +1864,10 @@ def _build_suspect_answer_system_prompt() -> str:
         "Use 1 or 2 short sentences, at most 3.\n"
         "Never use banmal.\n"
         "Do not sound like a narrator, a report, or an AI assistant.\n"
+        "Answer the detective's latest question or accusation directly in the first sentence.\n"
+        "Stay inside the scope of the latest question.\n"
+        "Do not introduce a new scene, time, place, meeting, motive, or backstory unless the detective asked about it or it is strictly needed to answer.\n"
+        "If the detective quotes a line, message, or statement, explain that exact line first.\n"
         "If the detective's pressure is weak, deny briefly or deflect politely.\n"
         "If a contradiction is raised, prioritize that contradiction over everything else.\n"
         "React to contradictions more strongly than to evidence lists.\n"
@@ -1856,6 +1948,9 @@ def llm_suspect_answer(
         extra_guard += "\n- Answer the contradiction first. Keep the reply polite, short, and focused on that inconsistency."
     elif pressure_level in {"medium", "high"}:
         extra_guard += "\n- Stay polite and give only one concrete detail."
+    extra_guard += "\n- Answer only the detective's latest question or accusation."
+    extra_guard += "\n- Put the direct answer in the first sentence."
+    extra_guard += "\n- Do not widen into unrelated scenes, meetings, background stories, or prior events unless they are strictly needed to answer."
     if is_too_ambiguous(user_text):
         extra_guard += "\n- 질문이 모호하면 무슨 뜻인지 되묻고 질문을 구체화하게 유도해라."
     if detect_repeat(history, user_text):
@@ -1918,6 +2013,130 @@ def llm_suspect_answer(
         out = trim_to_1_3_sentences((resp3.output_text or "").strip())
 
     return out or "…모릅니다. 정말 집에 있었습니다."
+
+# Override the legacy suspect answer generator with a question-focused version.
+def llm_suspect_answer(
+    case_context: str,
+    case_data: Optional[Dict[str, Any]],
+    history: List[Dict[str, Any]],
+    user_text: str,
+    confession_probability: float,
+    interrogation_signal: Optional[Dict[str, Any]] = None,
+) -> str:
+    system = _build_suspect_answer_system_prompt()
+    recent = history[-4:] if isinstance(history, list) else []
+    hist_lines: List[str] = []
+    detective_mentions: List[str] = []
+    for h in recent:
+        if not isinstance(h, dict):
+            continue
+        u = norm(h.get("user_text", ""))
+        s = norm(h.get("suspect_text", ""))
+        if u:
+            hist_lines.append(f"Detective: {u}")
+            detective_mentions.append(u)
+        if s:
+            hist_lines.append(f"Suspect: {s}")
+
+    detective_mentions.append(user_text)
+
+    allowed_evidence_words = _collect_allowed_evidence_words(case_data, detective_mentions)
+    all_evidence_words = _all_evidence_words(case_data)
+    turn_pressure_context = _build_turn_pressure_context_v2(case_data, interrogation_signal)
+    current_turn = (interrogation_signal or {}).get("current_turn", {}) if interrogation_signal else {}
+    pressure_level = str(current_turn.get("pressure_level", "none")).strip().lower()
+    has_current_contradiction = bool(current_turn.get("established_contradiction_ids", []))
+
+    extra_guard = ""
+    if turn_pressure_context:
+        extra_guard += turn_pressure_context
+    if has_current_contradiction:
+        extra_guard += "\n- Answer the contradiction directly and first."
+        extra_guard += "\n- Keep the reply polite, short, and focused on that inconsistency."
+    elif pressure_level in {"medium", "high"}:
+        extra_guard += "\n- Respond to the pressure point directly instead of broadening the story."
+        extra_guard += "\n- Stay polite and give only one concrete detail."
+    extra_guard += "\n- Answer only the detective's latest question or accusation."
+    extra_guard += "\n- Put the direct answer in the first sentence."
+    extra_guard += "\n- If the detective quotes a line or message, explain that exact line first."
+    extra_guard += "\n- Do not widen into unrelated scenes, meetings, background stories, or prior events unless they are strictly needed to answer."
+    if is_too_ambiguous(user_text):
+        extra_guard += "\n- If the question is vague, ask what point the detective wants clarified."
+    if detect_repeat(history, user_text):
+        extra_guard += "\n- If the same question is repeated, answer that same point plainly."
+
+    user = (
+        case_context
+        + f"\n[Current confession probability reference] {confession_probability:.2f}\n"
+        + "[Recent dialogue]\n"
+        + ("\n".join(hist_lines) if hist_lines else "(none)")
+        + f"\n[Latest detective question]\n{user_text}\n"
+        + f"\n[Evidence words already raised by the detective; do not go beyond these unless strictly needed] {allowed_evidence_words}\n"
+        + f"\n[Response guardrails]\n{extra_guard}\n"
+        + "Output only the suspect's reply."
+    )
+
+    def _generate_suspect_reply(prompt_text: str, max_output_tokens: int = 220) -> str:
+        resp = client.responses.create(
+            model=LLM_MODEL,
+            input=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": prompt_text},
+            ],
+            max_output_tokens=max_output_tokens,
+        )
+        return trim_to_1_3_sentences((resp.output_text or "").strip())
+
+    out = _generate_suspect_reply(user, 220)
+
+    if _contains_banned_evidence(out, all_evidence_words, allowed_evidence_words):
+        retry_user = (
+            user
+            + "\n\n[Correction] The previous reply mentioned evidence or facts the detective did not bring up. Remove that and answer with only a general denial or limited explanation."
+        )
+        out = _generate_suspect_reply(retry_user, 200)
+
+    review = llm_review_suspect_reply(user_text, out)
+    should_retry_for_specificity = (
+        pressure_level in {"medium", "high"} or has_current_contradiction
+    ) and _is_overly_evasive_answer(out)
+    should_retry_for_relevance = (
+        not review.get("answers_question_directly", True)
+        or review.get("introduces_unrelated_details", False)
+        or review.get("evades_core_issue", False)
+    )
+
+    if should_retry_for_specificity or should_retry_for_relevance:
+        warnings: List[str] = []
+        if should_retry_for_relevance:
+            warnings.append(
+                "The previous reply drifted away from the detective's latest question. Answer that exact question first and remove unrelated details."
+            )
+            if review.get("reason"):
+                warnings.append(f"Reviewer note: {review['reason']}")
+        if should_retry_for_specificity:
+            warnings.append(
+                "Do not stay vague. Respond directly to the pressure point with only one necessary concrete detail."
+            )
+        retry_user = user + "\n\n[Correction] " + " ".join(warnings)
+        out = _generate_suspect_reply(retry_user, 200)
+
+        final_review = llm_review_suspect_reply(user_text, out)
+        if (
+            not is_too_ambiguous(user_text)
+            and (
+                not final_review.get("answers_question_directly", True)
+                or final_review.get("introduces_unrelated_details", False)
+                or final_review.get("evades_core_issue", False)
+            )
+        ):
+            final_retry_user = (
+                user
+                + "\n\n[Final correction] Do not add any new background. Reply with only the direct answer to the latest question in one or two short polite sentences."
+            )
+            out = _generate_suspect_reply(final_retry_user, 180)
+
+    return out or "죄송하지만 그 질문에는 바로 답드리기 어렵습니다."
 
 def llm_confession(case_context: str, history: List[Dict[str, Any]], user_text: str) -> str:
     system = (
