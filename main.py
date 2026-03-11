@@ -366,28 +366,28 @@ def extract_case_keywords(case_data: Optional[Dict[str, Any]]) -> Tuple[List[str
 PRESSURE_LEVEL_BONUS = {
     "none": 0.0,
     "low": 0.005,
-    "medium": 0.015,
-    "high": 0.03,
+    "medium": 0.01,
+    "high": 0.02,
 }
 
 CONFESSION_LEVEL_BONUS = {
     "none": 0.0,
     "low": 0.0,
-    "medium": 0.01,
-    "high": 0.02,
+    "medium": 0.003,
+    "high": 0.008,
 }
 
-NEW_EVIDENCE_PRESSURE_DELTA = 0.20
-REPEATED_EVIDENCE_PRESSURE_DELTA = 0.08
-NEW_CONTRADICTION_PRESSURE_DELTA = 0.10
-REPEATED_CONTRADICTION_PRESSURE_DELTA = 0.05
-MAX_TURN_PRESSURE_DELTA = 0.30
+NEW_EVIDENCE_PRESSURE_DELTA = 0.08
+REPEATED_EVIDENCE_PRESSURE_DELTA = 0.02
+NEW_CONTRADICTION_PRESSURE_DELTA = 0.12
+REPEATED_CONTRADICTION_PRESSURE_DELTA = 0.04
+MAX_TURN_PRESSURE_DELTA = 0.22
 
-NEW_EVIDENCE_CONFESSION_GAIN = 0.20
-REPEATED_EVIDENCE_CONFESSION_GAIN = 0.08
+NEW_EVIDENCE_CONFESSION_GAIN = 0.04
+REPEATED_EVIDENCE_CONFESSION_GAIN = 0.00
 NEW_CONTRADICTION_CONFESSION_GAIN = 0.10
-REPEATED_CONTRADICTION_CONFESSION_GAIN = 0.05
-MAX_TURN_CONFESSION_GAIN = 0.30
+REPEATED_CONTRADICTION_CONFESSION_GAIN = 0.03
+MAX_TURN_CONFESSION_GAIN = 0.14
 
 DIALOGUE_CONTRADICTION_PRESSURE_BONUS = {
     "detective_highlighted": {
@@ -407,15 +407,15 @@ DIALOGUE_CONTRADICTION_PRESSURE_BONUS = {
 DIALOGUE_CONTRADICTION_CONFESSION_BONUS = {
     "detective_highlighted": {
         "none": 0.0,
-        "low": 0.01,
-        "medium": 0.03,
-        "high": 0.05,
+        "low": 0.005,
+        "medium": 0.01,
+        "high": 0.02,
     },
     "suspect_self_contradicted": {
         "none": 0.0,
-        "low": 0.02,
-        "medium": 0.05,
-        "high": 0.08,
+        "low": 0.01,
+        "medium": 0.02,
+        "high": 0.03,
     },
 }
 
@@ -486,47 +486,6 @@ INTERROGATION_EVAL_SCHEMA = {
     ],
 }
 
-DIALOGUE_CONTRADICTION_SCHEMA = {
-    "type": "object",
-    "additionalProperties": False,
-    "properties": {
-        "detective_highlighted": {"type": "boolean"},
-        "suspect_self_contradicted": {"type": "boolean"},
-        "severity": {
-            "type": "string",
-            "enum": ["none", "low", "medium", "high"],
-        },
-        "prior_claim": {"type": "string"},
-        "current_claim": {"type": "string"},
-        "reason": {"type": "string"},
-    },
-    "required": [
-        "detective_highlighted",
-        "suspect_self_contradicted",
-        "severity",
-        "prior_claim",
-        "current_claim",
-        "reason",
-    ],
-}
-
-SUSPECT_REPLY_REVIEW_SCHEMA = {
-    "type": "object",
-    "additionalProperties": False,
-    "properties": {
-        "answers_question_directly": {"type": "boolean"},
-        "introduces_unrelated_details": {"type": "boolean"},
-        "evades_core_issue": {"type": "boolean"},
-        "reason": {"type": "string"},
-    },
-    "required": [
-        "answers_question_directly",
-        "introduces_unrelated_details",
-        "evades_core_issue",
-        "reason",
-    ],
-}
-
 def uniq_strings(values: List[str]) -> List[str]:
     out = []
     seen = set()
@@ -560,23 +519,6 @@ def _dialogue_lines(history: List[Dict[str, Any]]) -> List[str]:
         if suspect_line:
             lines.append(f"피의자: {suspect_line}")
     return lines
-
-def _dialogue_turn_payload(history: List[Dict[str, Any]], limit: int = 6) -> List[Dict[str, str]]:
-    out: List[Dict[str, str]] = []
-    for entry in history[-limit:]:
-        if not isinstance(entry, dict):
-            continue
-        detective_text = norm(entry.get("user_text", ""))
-        suspect_text = norm(entry.get("suspect_text", ""))
-        if not detective_text and not suspect_text:
-            continue
-        out.append(
-            {
-                "detective_text": detective_text,
-                "suspect_text": suspect_text,
-            }
-        )
-    return out
 
 def _sanitize_id_list(values: Any, allowed_ids: set) -> List[str]:
     if not isinstance(values, list):
@@ -617,23 +559,6 @@ def _empty_dialogue_contradiction_signal(reason: str = "") -> Dict[str, Any]:
         "prior_claim": "",
         "current_claim": "",
         "reason": reason,
-    }
-
-def _sanitize_dialogue_contradiction_signal(raw_signal: Any) -> Dict[str, Any]:
-    if not isinstance(raw_signal, dict):
-        return _empty_dialogue_contradiction_signal("")
-
-    severity = str(raw_signal.get("severity", "none")).strip().lower()
-    if severity not in {"none", "low", "medium", "high"}:
-        severity = "none"
-
-    return {
-        "detective_highlighted": bool(raw_signal.get("detective_highlighted", False)),
-        "suspect_self_contradicted": bool(raw_signal.get("suspect_self_contradicted", False)),
-        "severity": severity,
-        "prior_claim": norm(raw_signal.get("prior_claim", "")),
-        "current_claim": norm(raw_signal.get("current_claim", "")),
-        "reason": norm(raw_signal.get("reason", "")),
     }
 
 def _sanitize_interrogation_signal(
@@ -828,69 +753,6 @@ def llm_evaluate_interrogation(
     except Exception:
         return _fallback_interrogation_signal(case_data, history, user_text)
 
-def llm_evaluate_dialogue_contradiction(
-    history: List[Dict[str, Any]],
-    user_text: str,
-    suspect_text: str,
-) -> Dict[str, Any]:
-    current_suspect_text = norm(suspect_text)
-    if not current_suspect_text:
-        return _empty_dialogue_contradiction_signal("empty suspect reply")
-
-    dialogue_payload = _dialogue_turn_payload(history, limit=8)
-    prior_suspect_turns = [turn for turn in dialogue_payload if turn.get("suspect_text")]
-    if not prior_suspect_turns:
-        return _empty_dialogue_contradiction_signal("no prior suspect statements")
-
-    payload = {
-        "history": dialogue_payload,
-        "current_detective_text": norm(user_text),
-        "current_suspect_text": current_suspect_text,
-    }
-
-    system = (
-        "You evaluate interrogation dialogue for self-contradictions.\n"
-        "Return only JSON.\n"
-        "Look for contradictions between the suspect's earlier statements in history and the current turn.\n"
-        "detective_highlighted is true only if the detective's latest question clearly points out or strongly implies a contradiction.\n"
-        "suspect_self_contradicted is true only if the suspect's new reply directly conflicts with an earlier suspect claim.\n"
-        "Do not flag mere elaboration, clarification, or added detail unless both claims cannot both be true.\n"
-        "Focus on alibi, time, place, action, presence, and who the suspect met.\n"
-        "Severity guide:\n"
-        "- none: no contradiction\n"
-        "- low: weak or ambiguous mismatch\n"
-        "- medium: clear mismatch on one important detail\n"
-        "- high: direct alibi, location, or action contradiction\n"
-        "prior_claim should summarize the earlier suspect claim that conflicts.\n"
-        "current_claim should summarize the current turn's conflicting claim.\n"
-    )
-
-    try:
-        resp = client.responses.create(
-            model=LLM_MODEL,
-            input=[
-                {"role": "system", "content": system},
-                {
-                    "role": "user",
-                    "content": json.dumps(payload, ensure_ascii=False, indent=2),
-                },
-            ],
-            text={
-                "format": {
-                    "type": "json_schema",
-                    "name": "dialogue_contradiction",
-                    "strict": True,
-                    "schema": DIALOGUE_CONTRADICTION_SCHEMA,
-                }
-            },
-            max_output_tokens=250,
-            store=False,
-        )
-        raw_signal = safe_json_loads((resp.output_text or "").strip(), {})
-        return _sanitize_dialogue_contradiction_signal(raw_signal)
-    except Exception:
-        return _empty_dialogue_contradiction_signal("dialogue contradiction eval failed")
-
 def apply_dialogue_contradiction_bonus(
     pressure_delta: float,
     confession_probability: float,
@@ -941,66 +803,6 @@ def _default_suspect_reply_review(
         "evades_core_issue": False,
         "reason": reason,
     }
-
-def _sanitize_suspect_reply_review(raw_signal: Any) -> Dict[str, Any]:
-    if not isinstance(raw_signal, dict):
-        return _default_suspect_reply_review("")
-
-    return {
-        "answers_question_directly": bool(raw_signal.get("answers_question_directly", True)),
-        "introduces_unrelated_details": bool(raw_signal.get("introduces_unrelated_details", False)),
-        "evades_core_issue": bool(raw_signal.get("evades_core_issue", False)),
-        "reason": norm(raw_signal.get("reason", "")),
-    }
-
-def llm_review_suspect_reply(user_text: str, suspect_text: str) -> Dict[str, Any]:
-    detective_text = norm(user_text)
-    reply_text = norm(suspect_text)
-
-    if not reply_text:
-        return _default_suspect_reply_review(
-            "empty suspect reply",
-            answers_question_directly=False,
-        )
-
-    payload = {
-        "detective_text": detective_text,
-        "suspect_reply": reply_text,
-    }
-    system = (
-        "You review whether a suspect's reply directly answers a detective's latest question.\n"
-        "Return only JSON.\n"
-        "answers_question_directly is true only if the reply clearly addresses the literal question, accusation, or quoted statement.\n"
-        "introduces_unrelated_details is true if the reply brings in a new scene, meeting, time, place, person, or backstory that is not needed to answer the latest question.\n"
-        "evades_core_issue is true if the reply sidesteps the main point and answers something adjacent instead.\n"
-        "A short denial or reinterpretation is acceptable if it directly addresses the question first.\n"
-    )
-
-    try:
-        resp = client.responses.create(
-            model=LLM_MODEL,
-            input=[
-                {"role": "system", "content": system},
-                {
-                    "role": "user",
-                    "content": json.dumps(payload, ensure_ascii=False, indent=2),
-                },
-            ],
-            text={
-                "format": {
-                    "type": "json_schema",
-                    "name": "suspect_reply_review",
-                    "strict": True,
-                    "schema": SUSPECT_REPLY_REVIEW_SCHEMA,
-                }
-            },
-            max_output_tokens=200,
-            store=False,
-        )
-        raw_signal = safe_json_loads((resp.output_text or "").strip(), {})
-        return _sanitize_suspect_reply_review(raw_signal)
-    except Exception:
-        return _default_suspect_reply_review("suspect reply review failed")
 
 def _count_meaningful_turns(history: List[Dict[str, Any]], user_text: str) -> int:
     seen = set()
@@ -1137,52 +939,6 @@ def build_case_context(case_data: Optional[Dict[str, Any]]) -> str:
         "======================\n"
     )
 
-def calc_pressure_and_prob(
-    case_data: Optional[Dict[str, Any]],
-    history: List[Dict[str, Any]],
-    user_text: str,
-    interrogation_signal: Optional[Dict[str, Any]] = None,
-) -> Tuple[float, float]:
-    """
-    2주차 초기 버전 + 3주차 안정화(반복 질문 반감)
-    - 증거 언급: +0.20 * hits
-    - 모순 찌름: +0.35 * hits
-    - 기본 확률: 0.12 + min(0.30, 0.03 * 질문수)
-    - 최종 확률 = base + pressure, 0~1 클램프
-    """
-    ev_kws, cd_kws = extract_case_keywords(case_data)
-
-    all_text = user_text + " " + " ".join(
-        [(h.get("user_text", "") or "") for h in history if isinstance(h, dict)]
-    )
-    all_text_match = norm_for_match(all_text)
-
-    ev_hits = 0
-    cd_hits = 0
-
-    for kw in ev_kws:
-        kw_match = norm_for_match(kw)
-        if kw_match and kw_match in all_text_match:
-            ev_hits += 1
-    for kw in cd_kws:
-        kw_match = norm_for_match(kw)
-        if kw_match and kw_match in all_text_match:
-            cd_hits += 1
-
-    pressure = 0.0
-    pressure += 0.20 * ev_hits
-    pressure += 0.35 * cd_hits
-    pressure = clamp01(pressure)
-
-    base = 0.12 + min(0.30, 0.03 * len(history))
-    prob = clamp01(base + pressure)
-
-    # 반복 질문은 압박 반감(치팅 방지)
-    if detect_repeat(history, user_text):
-        pressure = clamp01(pressure * 0.5)
-        prob = clamp01(base + pressure)
-
-    return pressure, prob
 
 def calc_pressure_and_prob_v2(
     case_data: Optional[Dict[str, Any]],
@@ -1259,7 +1015,7 @@ def calc_pressure_and_prob_v2(
     max_gain += NEW_CONTRADICTION_CONFESSION_GAIN * len(new_contradiction_ids)
     max_gain += REPEATED_CONTRADICTION_CONFESSION_GAIN * len(repeated_contradiction_ids)
     if pressure_level == "high":
-        max_gain += 0.02
+        max_gain += 0.01
     max_gain = min(MAX_TURN_CONFESSION_GAIN, max_gain)
 
     confession_probability = max(
@@ -1375,8 +1131,8 @@ CASE_JSON_SCHEMA = {
                 },
                 "required": ["id", "name", "description"],
             },
-            "minItems": 2,
-            "maxItems": 6,
+            "minItems": 4,
+            "maxItems": 5,
         },
         "contradictions": {
             "type": "array",
@@ -1391,11 +1147,10 @@ CASE_JSON_SCHEMA = {
                         "items": {"type": "string"},
                     },
                 },
-                # ✅ 여기만 수정: related_evidence를 required에 포함
                 "required": ["id", "description", "related_evidence"],
             },
-            "minItems": 2,
-            "maxItems": 5,
+            "minItems": 3,
+            "maxItems": 4,
         },
     },
     "required": [
@@ -1513,63 +1268,6 @@ def _register_generated_case_type(case_data: Dict[str, Any]) -> None:
 
 def llm_generate_case() -> Dict[str, Any]:
     """
-    seed 없이, case_interrogation_01.json 예시를 보고 자동 생성.
-    - 구조/톤/필드 사용방식은 예시를 따르되
-    - 내용(사건/인물/증거/모순)은 반드시 새로 만들기
-    """
-    system = (
-        "너는 '음성 기반 심문 게임'의 사건 생성기다.\n"
-        "현실적인 한국 수사/심문 톤의 사건을 만든다.\n"
-        "규칙:\n"
-        "- 출력은 반드시 JSON이며, 주어진 스키마를 엄격히 준수한다.\n"
-        "- 아래 제공되는 '예시 사건 JSON'은 형식/톤/밀도(정보량)의 기준이다.\n"
-        "- 예시와 '구조'는 비슷하게 유지하되, '내용'은 완전히 다른 새 사건으로 만들 것.\n"
-        "- evidences는 2~6개, contradictions는 2~5개.\n"
-        "- contradictions.related_evidence에는 연결되는 evidence id를 넣어라(가능하면 1개 이상).\n"
-        "- false_statement는 초반엔 그럴듯하지만, 증거/모순 누적으로 무너지게 설계.\n"
-        "- crime_flow는 '사실(정답)' 요약이며, 플레이어에게 직접 노출되지 않는 내부 참고용.\n"
-        "- case_id는 'case_'로 시작하는 문자열.\n"
-    )
-
-    example_block = (
-        f"\n[예시 사건 JSON]\n{EXAMPLE_CASE_TEXT}\n"
-        if EXAMPLE_CASE_TEXT else
-        "\n[예시 사건 JSON]\n(예시 파일이 없어도 생성은 해야 한다.)\n"
-    )
-    user = (
-        "예시를 참고해서, 완전히 새로운 사건 1개를 생성하라.\n"
-        "중요: 예시의 문장/표현/사건 디테일을 그대로 복사하지 말고, 다른 사건으로 만들 것.\n"
-        "사건 유형/장소/증거/모순 조합이 뻔하지 않게 다양하게 만들 것.\n"
-        + example_block +
-        "\n이제 새 사건 JSON을 출력하라.\n"
-    )
-
-    resp = client.responses.create(
-        model=LLM_MODEL,
-        input=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-        text={
-            "format": {
-                "type": "json_schema",
-                "name": "interrogation_case",
-                "strict": True,
-                "schema": CASE_JSON_SCHEMA,
-            }
-        },
-        #max_output_tokens=1100,
-        max_output_tokens=4000,
-        store=False,
-        temperature=1.0,
-    )
-
-    text = (resp.output_text or "").strip()
-    return json.loads(text)
-
-# Override the legacy generator with a diversity-aware version.
-def llm_generate_case() -> Dict[str, Any]:
-    """
     Generate a structured interrogation case while actively varying crime type.
     """
     system = (
@@ -1578,8 +1276,8 @@ def llm_generate_case() -> Dict[str, Any]:
         "The example JSON is only a schema/style reference, not a crime-type template.\n"
         "Vary the crime type, setting, suspect relationship, and motive across generations.\n"
         "Do not keep generating arson or fire cases unless the target profile explicitly asks for one.\n"
-        "evidences must contain 2 to 6 items.\n"
-        "contradictions must contain 2 to 5 items.\n"
+        "evidences must contain 4 to 5 items.\n"
+        "contradictions must contain 3 to 4 items.\n"
         "Each contradiction.related_evidence should reference at least one evidence id when possible.\n"
         "false_statement should sound plausible at first but collapse under evidence or contradiction pressure.\n"
         "crime_flow is the hidden ground truth summary.\n"
@@ -1718,75 +1416,6 @@ def _contains_banned_evidence(text: str, all_words: List[str], allowed_words: Li
             return True
     return False
 
-def _build_turn_pressure_context(
-    case_data: Optional[Dict[str, Any]],
-    interrogation_signal: Optional[Dict[str, Any]],
-) -> str:
-    if not case_data or not interrogation_signal:
-        return ""
-
-    current_turn = interrogation_signal.get("current_turn", {}) or {}
-    pressure_level = str(current_turn.get("pressure_level", "none")).strip().lower()
-    current_evidence_ids = current_turn.get("referenced_evidence_ids", []) or []
-    current_contradiction_ids = current_turn.get("established_contradiction_ids", []) or []
-
-    evidence_map = {
-        str(e.get("id", "")).strip(): e
-        for e in _case_evidences(case_data)
-        if e.get("id")
-    }
-    contradiction_map = {
-        str(c.get("id", "")).strip(): c
-        for c in _case_contradictions(case_data)
-        if c.get("id")
-    }
-
-    evidence_lines = []
-    for evidence_id in current_evidence_ids:
-        evidence = evidence_map.get(str(evidence_id).strip())
-        if evidence:
-            evidence_lines.append(
-                f"- {evidence.get('name', evidence_id)}: {evidence.get('description', '')}".strip()
-            )
-
-    contradiction_lines = []
-    for contradiction_id in current_contradiction_ids:
-        contradiction = contradiction_map.get(str(contradiction_id).strip())
-        if contradiction:
-            contradiction_lines.append(f"- {contradiction.get('description', '')}".strip())
-
-    directives = []
-    if current_contradiction_ids:
-        directives.append(
-            "- 이번 답변에서는 방금 지적된 모순을 직접 다뤄라. 짧은 부인이나 말 돌리기는 금지다."
-        )
-    elif current_evidence_ids:
-        directives.append(
-            "- 이번 답변에서는 방금 언급된 증거에 직접 반응하라. 일반론으로만 회피하지 마라."
-        )
-
-    if pressure_level in {"medium", "high"}:
-        directives.append(
-            "- 이번 답변에서는 시간, 장소, 행동 중 최소 하나를 구체적으로 말해라."
-        )
-    if pressure_level == "high":
-        directives.append(
-            "- 완전 자백은 아니어도 진술 일부 수정, 사실 일부 인정, 감정 흔들림이 자연스럽다."
-        )
-
-    if not evidence_lines and not contradiction_lines and not directives:
-        return ""
-
-    return (
-        f"\n[이번 턴 압박 수준] {pressure_level}\n"
-        "[이번 턴에 형사가 꺼낸 증거]\n"
-        + ("\n".join(evidence_lines) if evidence_lines else "(없음)")
-        + "\n[이번 턴에 형사가 찌른 모순]\n"
-        + ("\n".join(contradiction_lines) if contradiction_lines else "(없음)")
-        + "\n[이번 답변 지침]\n"
-        + ("\n".join(directives) if directives else "(없음)")
-    )
-
 def _is_overly_evasive_answer(text: str) -> bool:
     t = norm(text)
     if not t:
@@ -1917,133 +1546,6 @@ def llm_suspect_answer(
     confession_probability: float,
     interrogation_signal: Optional[Dict[str, Any]] = None,
 ) -> str:
-    """
-    용의자 답변 생성(2~3주차)
-    - 형사가 꺼내지 않은 증거를 먼저 말하지 않게 가드
-    - 1~3문장
-    """
-    system = (
-        "너는 심문실에 앉아있는 '용의자'다.\n"
-        "유저는 담당 형사다.\n"
-        "규칙:\n"
-        "- 한국어\n"
-        "- 1~3문장\n"
-        "- 너무 소설처럼 장황하게 말하지 말 것\n"
-        "- 형사가 언급하지 않은 증거(예: CCTV, 목격자, 물증)를 네가 먼저 꺼내지 마라.\n"
-        "- 증거/모순 압박이 약하면 기본 거짓 진술을 유지하며 버틴다.\n"
-        "- 압박이 강하면 변명/흔들림/부분 인정(핵심 범행 자백은 금지)을 한다.\n"
-        "- 자백 트리거가 아니면 범행을 완전 자백하지 말 것.\n"
-    )
-
-    system = _build_suspect_answer_system_prompt()
-    recent = history[-4:] if isinstance(history, list) else []
-    hist_lines = []
-    detective_mentions = []
-    for h in recent:
-        if not isinstance(h, dict):
-            continue
-        u = (h.get("user_text", "") or "").strip()
-        s = (h.get("suspect_text", "") or "").strip()
-        if u:
-            hist_lines.append(f"형사: {u}")
-            detective_mentions.append(u)
-        if s:
-            hist_lines.append(f"용의자: {s}")
-
-    detective_mentions.append(user_text)
-
-    allowed_evidence_words = _collect_allowed_evidence_words(case_data, detective_mentions)
-    all_evidence_words = _all_evidence_words(case_data)
-    turn_pressure_context = _build_turn_pressure_context_v2(case_data, interrogation_signal)
-    current_turn = (interrogation_signal or {}).get("current_turn", {}) if interrogation_signal else {}
-    pressure_level = str(current_turn.get("pressure_level", "none")).strip().lower()
-    has_current_contradiction = bool(current_turn.get("established_contradiction_ids", []))
-    extra_guard = ""
-    if turn_pressure_context:
-        extra_guard += turn_pressure_context
-    if has_current_contradiction:
-        extra_guard += "\n- 방금 지적된 모순을 직접 해명하거나 진술 일부를 수정해라. 짧은 부인만 하지 마라."
-    elif pressure_level in {"medium", "high"}:
-        extra_guard += "\n- 이번에는 질문을 피해 가지 말고 구체적인 사실 하나는 내놓아라."
-    if has_current_contradiction:
-        extra_guard += "\n- Answer the contradiction first. Keep the reply polite, short, and focused on that inconsistency."
-    elif pressure_level in {"medium", "high"}:
-        extra_guard += "\n- Stay polite and give only one concrete detail."
-    extra_guard += "\n- Answer only the detective's latest question or accusation."
-    extra_guard += "\n- Put the direct answer in the first sentence."
-    extra_guard += "\n- Do not widen into unrelated scenes, meetings, background stories, or prior events unless they are strictly needed to answer."
-    if is_too_ambiguous(user_text):
-        extra_guard += "\n- 질문이 모호하면 무슨 뜻인지 되묻고 질문을 구체화하게 유도해라."
-    if detect_repeat(history, user_text):
-        extra_guard += "\n- 같은 질문을 반복하면 이미 답했다고 짧게 말해라."
-
-    user = (
-        case_context +
-        f"\n[현재 자백 확률(참고용)] {confession_probability:.2f}\n"
-        "[최근 대화]\n" + ("\n".join(hist_lines) if hist_lines else "(없음)") + "\n"
-        f"\n형사의 질문: {user_text}\n"
-        f"\n[형사가 이미 꺼낸 증거 키워드(이것만 언급 가능)] {allowed_evidence_words}\n"
-        f"\n[추가 가드]\n{extra_guard}\n"
-        "용의자의 답변만 출력하라."
-    )
-
-    resp = client.responses.create(
-        model=LLM_MODEL,
-        input=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-        max_output_tokens=220,
-    )
-    out = trim_to_1_3_sentences((resp.output_text or "").strip())
-    should_retry_for_specificity = (
-        pressure_level in {"medium", "high"} or has_current_contradiction
-    ) and _is_overly_evasive_answer(out)
-
-    # 금지 증거 스포가 나오면 1회 재시도
-    if _contains_banned_evidence(out, all_evidence_words, allowed_evidence_words):
-        retry_user = (
-            user +
-            "\n\n[경고] 방금 답변에 '형사가 언급하지 않은 증거'가 포함됐다. "
-            "그런 단어는 절대 말하지 말고, 일반적인 부인/변명으로만 다시 답해라."
-        )
-        resp2 = client.responses.create(
-            model=LLM_MODEL,
-            input=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": retry_user},
-            ],
-            max_output_tokens=200,
-        )
-        out = trim_to_1_3_sentences((resp2.output_text or "").strip())
-
-    if should_retry_for_specificity and _is_overly_evasive_answer(out):
-        retry_user = (
-            user +
-            "\n\n[경고] 방금 답변은 너무 회피적이다. "
-            "이번에는 방금 제시된 증거나 모순에 직접 반응하고, 시간, 장소, 행동 중 하나는 구체적으로 말해라."
-        )
-        resp3 = client.responses.create(
-            model=LLM_MODEL,
-            input=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": retry_user},
-            ],
-            max_output_tokens=200,
-        )
-        out = trim_to_1_3_sentences((resp3.output_text or "").strip())
-
-    return out or "…모릅니다. 정말 집에 있었습니다."
-
-# Override the legacy suspect answer generator with a question-focused version.
-def llm_suspect_answer(
-    case_context: str,
-    case_data: Optional[Dict[str, Any]],
-    history: List[Dict[str, Any]],
-    user_text: str,
-    confession_probability: float,
-    interrogation_signal: Optional[Dict[str, Any]] = None,
-) -> str:
     system = _build_suspect_answer_system_prompt()
     recent = history[-4:] if isinstance(history, list) else []
     hist_lines: List[str] = []
@@ -2144,7 +1646,6 @@ def llm_suspect_answer(
 
     return out or "죄송하지만 그 질문에는 바로 답드리기 어렵습니다."
 
-# Override the slow post-answer evaluators with local heuristics.
 _CONTRADICTION_CUE_PATTERNS = (
     "아까", "방금", "전에", "처음엔", "그런데", "근데", "모순", "말이다르",
     "말이다르잖", "했잖", "라면서", "라고했", "아니라며", "왜이제", "왜지금",
@@ -2320,16 +1821,6 @@ def llm_evaluate_dialogue_contradiction(
     }
 
 def llm_confession(case_context: str, history: List[Dict[str, Any]], user_text: str) -> str:
-    system = (
-        "너는 심문실에 앉아있는 '용의자'다.\n"
-        "유저는 담당 형사다.\n"
-        "지금은 '자백하는 순간'이다.\n"
-        "규칙:\n"
-        "- 한국어\n"
-        "- 1~3문장\n"
-        "- 변명보다 '인정' 중심\n"
-        "- 감정(체념/후회/두려움) 중 하나를 살짝 포함\n"
-    )
 
     recent = history[-4:] if isinstance(history, list) else []
     hist_lines = []
