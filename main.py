@@ -383,6 +383,12 @@ NEW_CONTRADICTION_PRESSURE_DELTA = 0.10
 REPEATED_CONTRADICTION_PRESSURE_DELTA = 0.05
 MAX_TURN_PRESSURE_DELTA = 0.30
 
+NEW_EVIDENCE_CONFESSION_GAIN = 0.20
+REPEATED_EVIDENCE_CONFESSION_GAIN = 0.08
+NEW_CONTRADICTION_CONFESSION_GAIN = 0.10
+REPEATED_CONTRADICTION_CONFESSION_GAIN = 0.05
+MAX_TURN_CONFESSION_GAIN = 0.30
+
 DIALOGUE_CONTRADICTION_PRESSURE_BONUS = {
     "detective_highlighted": {
         "none": 0.0,
@@ -920,10 +926,8 @@ def apply_dialogue_contradiction_bonus(
     pressure_bonus = min(0.10, max(pressure_bonus_candidates))
     confession_bonus = max(confession_bonus_candidates)
 
-    boosted_pressure = clamp01(min(0.20, pressure_delta + pressure_bonus))
+    boosted_pressure = clamp01(min(MAX_TURN_PRESSURE_DELTA, pressure_delta + pressure_bonus))
     boosted_probability = clamp01(confession_probability + confession_bonus)
-    if not confession_triggered and boosted_probability >= 0.85:
-        boosted_probability = 0.84
 
     return boosted_pressure, boosted_probability
 
@@ -1243,20 +1247,20 @@ def calc_pressure_and_prob_v2(
 
     meaningful_turns = _count_meaningful_turns(history, user_text)
     computed_probability = (
-        0.05 * len(cumulative_evidence_ids)
-        + 0.20 * len(cumulative_contradiction_ids)
-        + min(0.08, 0.01 * meaningful_turns)
+        NEW_EVIDENCE_CONFESSION_GAIN * len(cumulative_evidence_ids)
+        + NEW_CONTRADICTION_CONFESSION_GAIN * len(cumulative_contradiction_ids)
+        + min(0.05, 0.005 * meaningful_turns)
         + CONFESSION_LEVEL_BONUS.get(pressure_level, 0.0)
     )
 
-    max_gain = 0.10
-    if new_evidence_ids:
-        max_gain += 0.03
-    if new_contradiction_ids:
-        max_gain += 0.06
+    max_gain = 0.0
+    max_gain += NEW_EVIDENCE_CONFESSION_GAIN * len(new_evidence_ids)
+    max_gain += REPEATED_EVIDENCE_CONFESSION_GAIN * len(repeated_evidence_ids)
+    max_gain += NEW_CONTRADICTION_CONFESSION_GAIN * len(new_contradiction_ids)
+    max_gain += REPEATED_CONTRADICTION_CONFESSION_GAIN * len(repeated_contradiction_ids)
     if pressure_level == "high":
         max_gain += 0.02
-    max_gain = min(0.20, max_gain)
+    max_gain = min(MAX_TURN_CONFESSION_GAIN, max_gain)
 
     confession_probability = max(
         prior_confession_probability,
@@ -2138,21 +2142,6 @@ def llm_suspect_answer(
         retry_user = user + "\n\n[Correction] " + " ".join(warnings)
         out = _generate_suspect_reply(retry_user, 200)
 
-        final_review = llm_review_suspect_reply(user_text, out)
-        if (
-            not is_too_ambiguous(user_text)
-            and (
-                not final_review.get("answers_question_directly", True)
-                or final_review.get("introduces_unrelated_details", False)
-                or final_review.get("evades_core_issue", False)
-            )
-        ):
-            final_retry_user = (
-                user
-                + "\n\n[Final correction] Do not add any new background. Reply with only the direct answer to the latest question in one or two short polite sentences."
-            )
-            out = _generate_suspect_reply(final_retry_user, 180)
-
     return out or "죄송하지만 그 질문에는 바로 답드리기 어렵습니다."
 
 # Override the slow post-answer evaluators with local heuristics.
@@ -2398,6 +2387,87 @@ async def case_generate():
         tb = traceback.format_exc()
         return JSONResponse(status_code=500, content={"error": str(e), "traceback": tb[-2000:]})
 
+@app.post("/interrogation/debug_confess")
+async def interrogation_debug_confess(
+    case_id: str = Form(""),
+    case_json: str = Form(""),
+    history_json: str = Form("[]"),
+    user_text: str = Form(""),
+):
+    try:
+        history = safe_json_loads(history_json, [])
+        if not isinstance(history, list):
+            history = []
+        history = history[-20:]
+
+        case_id = norm(case_id)
+        case_data = None
+        client_case_payload = safe_json_loads(case_json, None) if case_json.strip() else None
+        client_case_data = coerce_case_payload(client_case_payload, case_id)
+        if client_case_data:
+            payload_case_id = norm(client_case_data.get("case_id", ""))
+            if case_id and payload_case_id != case_id:
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "error": "case_id_mismatch",
+                        "message": "case_id and case_json.case_id do not match.",
+                        "case_id": case_id,
+                        "case_json_case_id": payload_case_id,
+                    },
+                )
+            case_id = payload_case_id
+            case_data = client_case_data
+            CASE_CACHE[case_id] = case_data
+            persist_case(case_data)
+        elif case_id:
+            case_data = load_case(case_id)
+        if case_id and not case_data:
+            return JSONResponse(
+                status_code=404,
+                content={
+                    "error": "case_not_found",
+                    "message": "Unknown case_id.",
+                    "case_id": case_id,
+                },
+            )
+
+        final_user_text = norm(user_text)
+        if not final_user_text:
+            for entry in reversed(history):
+                if not isinstance(entry, dict):
+                    continue
+                candidate = norm(entry.get("user_text", ""))
+                if candidate:
+                    final_user_text = candidate
+                    break
+        if not final_user_text:
+            final_user_text = "더는 숨길 수 없으니 사실대로 전부 인정하세요."
+
+        case_context = build_case_context(case_data)
+        suspect_text = trim_to_1_3_sentences(
+            llm_confession(case_context, history, final_user_text)
+        )
+        wav_b64 = await tts_to_b64(suspect_text)
+        return JSONResponse(
+            status_code=200,
+            content={
+                "user_text": "",
+                "suspect_text": suspect_text,
+                "pressure_delta": 0.0,
+                "confession_probability": 1.0,
+                "confession_triggered": True,
+                "debug_force_confession": True,
+                "audio_wav_b64": wav_b64,
+            },
+        )
+    except Exception as e:
+        tb = traceback.format_exc()
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(e), "traceback": tb[-2000:]},
+        )
+
 @app.post("/interrogation/qna")
 async def interrogation_qna(
     file: Optional[UploadFile] = File(None),
@@ -2538,6 +2608,11 @@ async def interrogation_qna(
             dialogue_contradiction_signal,
             confession_triggered,
         )
+        if not confession_triggered and confession_probability >= 0.85:
+            confession_triggered = True
+            suspect_text = trim_to_1_3_sentences(
+                llm_confession(case_context, history, final_user_text)
+            )
 
         # 5) TTS
         wav_b64 = await tts_to_b64(suspect_text)
