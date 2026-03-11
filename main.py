@@ -1102,7 +1102,6 @@ def llm_generate_case() -> Dict[str, Any]:
         if EXAMPLE_CASE_TEXT else
         "\n[예시 사건 JSON]\n(예시 파일이 없어도 생성은 해야 한다.)\n"
     )
-
     user = (
         "예시를 참고해서, 완전히 새로운 사건 1개를 생성하라.\n"
         "중요: 예시의 문장/표현/사건 디테일을 그대로 복사하지 말고, 다른 사건으로 만들 것.\n"
@@ -1322,16 +1321,19 @@ def _build_turn_pressure_context_v2(
     directives = []
     if current_contradiction_ids:
         directives.append(
-            "- Address the contradiction directly. Do not only deny and move on."
+            "- Prioritize the contradiction above everything else. Answer that inconsistency directly in polite Korean."
+        )
+        directives.append(
+            "- Keep the reply short and defensive. Do not widen the answer with unrelated evidence or narration."
         )
     elif current_evidence_ids:
         directives.append(
-            "- React to the evidence that was just mentioned. Do not dodge with a generic denial."
+            "- React to the evidence briefly in polite Korean. Do not overexplain unless it clearly exposes a contradiction."
         )
 
     if pressure_level in {"medium", "high"}:
         directives.append(
-            "- Give at least one concrete detail about time, place, or behavior."
+            "- Give only one concrete detail, and only if it helps explain the pressure point or contradiction."
         )
     if pressure_level == "high":
         directives.append(
@@ -1354,13 +1356,15 @@ def _build_turn_pressure_context_v2(
 def _build_suspect_answer_system_prompt() -> str:
     return (
         "You are a suspect being interrogated by a detective.\n"
-        "Reply in natural spoken Korean.\n"
+        "Reply in natural spoken Korean using polite speech (존댓말) every turn.\n"
         "Use 1 or 2 short sentences, at most 3.\n"
+        "Never use banmal.\n"
         "Do not sound like a narrator, a report, or an AI assistant.\n"
-        "Do not use stiff literary wording or repetitive honorifics every turn.\n"
-        "If the detective's pressure is weak, deny briefly or deflect.\n"
-        "If evidence or a contradiction is raised, react to that point directly.\n"
-        "If pressure is strong, let your story shake and reveal a small concrete fact.\n"
+        "If the detective's pressure is weak, deny briefly or deflect politely.\n"
+        "If a contradiction is raised, prioritize that contradiction over everything else.\n"
+        "React to contradictions more strongly than to evidence lists.\n"
+        "If evidence is mentioned without a clear contradiction, answer briefly and do not overexplain.\n"
+        "If pressure is strong, let your story shake slightly and reveal only one small concrete fact.\n"
         "Do not mention evidence the detective has not brought up yet.\n"
         "Do not fully confess unless the confession trigger is reached.\n"
     )
@@ -1368,8 +1372,9 @@ def _build_suspect_answer_system_prompt() -> str:
 def _build_confession_system_prompt() -> str:
     return (
         "You are a suspect finally breaking under interrogation.\n"
-        "Reply in natural spoken Korean.\n"
+        "Reply in natural spoken Korean using polite speech (존댓말).\n"
         "Use 1 or 2 short sentences, at most 3.\n"
+        "Never use banmal.\n"
         "Do not sound theatrical, poetic, or robotic.\n"
         "Confess the crime directly instead of circling around it.\n"
         "You may include guilt, fear, regret, or resignation, but keep it grounded.\n"
@@ -1431,6 +1436,10 @@ def llm_suspect_answer(
         extra_guard += "\n- 방금 지적된 모순을 직접 해명하거나 진술 일부를 수정해라. 짧은 부인만 하지 마라."
     elif pressure_level in {"medium", "high"}:
         extra_guard += "\n- 이번에는 질문을 피해 가지 말고 구체적인 사실 하나는 내놓아라."
+    if has_current_contradiction:
+        extra_guard += "\n- Answer the contradiction first. Keep the reply polite, short, and focused on that inconsistency."
+    elif pressure_level in {"medium", "high"}:
+        extra_guard += "\n- Stay polite and give only one concrete detail."
     if is_too_ambiguous(user_text):
         extra_guard += "\n- 질문이 모호하면 무슨 뜻인지 되묻고 질문을 구체화하게 유도해라."
     if detect_repeat(history, user_text):
@@ -1528,7 +1537,7 @@ def llm_confession(case_context: str, history: List[Dict[str, Any]], user_text: 
     resp = client.responses.create(
         model=LLM_MODEL,
         input=[
-            {"role": "system", "content": system},
+            {"role": "system", "content": _build_confession_system_prompt()},
             {"role": "user", "content": user},
         ],
         max_output_tokens=200,
