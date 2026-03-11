@@ -377,6 +377,36 @@ CONFESSION_LEVEL_BONUS = {
     "high": 0.02,
 }
 
+DIALOGUE_CONTRADICTION_PRESSURE_BONUS = {
+    "detective_highlighted": {
+        "none": 0.0,
+        "low": 0.02,
+        "medium": 0.06,
+        "high": 0.10,
+    },
+    "suspect_self_contradicted": {
+        "none": 0.0,
+        "low": 0.04,
+        "medium": 0.10,
+        "high": 0.16,
+    },
+}
+
+DIALOGUE_CONTRADICTION_CONFESSION_BONUS = {
+    "detective_highlighted": {
+        "none": 0.0,
+        "low": 0.01,
+        "medium": 0.03,
+        "high": 0.05,
+    },
+    "suspect_self_contradicted": {
+        "none": 0.0,
+        "low": 0.02,
+        "medium": 0.05,
+        "high": 0.08,
+    },
+}
+
 INTERROGATION_EVAL_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
@@ -444,6 +474,30 @@ INTERROGATION_EVAL_SCHEMA = {
     ],
 }
 
+DIALOGUE_CONTRADICTION_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "detective_highlighted": {"type": "boolean"},
+        "suspect_self_contradicted": {"type": "boolean"},
+        "severity": {
+            "type": "string",
+            "enum": ["none", "low", "medium", "high"],
+        },
+        "prior_claim": {"type": "string"},
+        "current_claim": {"type": "string"},
+        "reason": {"type": "string"},
+    },
+    "required": [
+        "detective_highlighted",
+        "suspect_self_contradicted",
+        "severity",
+        "prior_claim",
+        "current_claim",
+        "reason",
+    ],
+}
+
 def uniq_strings(values: List[str]) -> List[str]:
     out = []
     seen = set()
@@ -478,6 +532,23 @@ def _dialogue_lines(history: List[Dict[str, Any]]) -> List[str]:
             lines.append(f"피의자: {suspect_line}")
     return lines
 
+def _dialogue_turn_payload(history: List[Dict[str, Any]], limit: int = 6) -> List[Dict[str, str]]:
+    out: List[Dict[str, str]] = []
+    for entry in history[-limit:]:
+        if not isinstance(entry, dict):
+            continue
+        detective_text = norm(entry.get("user_text", ""))
+        suspect_text = norm(entry.get("suspect_text", ""))
+        if not detective_text and not suspect_text:
+            continue
+        out.append(
+            {
+                "detective_text": detective_text,
+                "suspect_text": suspect_text,
+            }
+        )
+    return out
+
 def _sanitize_id_list(values: Any, allowed_ids: set) -> List[str]:
     if not isinstance(values, list):
         return []
@@ -507,6 +578,33 @@ def _empty_interrogation_signal(reason: str = "") -> Dict[str, Any]:
             "established_contradiction_ids": [],
         },
         "reason": reason,
+    }
+
+def _empty_dialogue_contradiction_signal(reason: str = "") -> Dict[str, Any]:
+    return {
+        "detective_highlighted": False,
+        "suspect_self_contradicted": False,
+        "severity": "none",
+        "prior_claim": "",
+        "current_claim": "",
+        "reason": reason,
+    }
+
+def _sanitize_dialogue_contradiction_signal(raw_signal: Any) -> Dict[str, Any]:
+    if not isinstance(raw_signal, dict):
+        return _empty_dialogue_contradiction_signal("")
+
+    severity = str(raw_signal.get("severity", "none")).strip().lower()
+    if severity not in {"none", "low", "medium", "high"}:
+        severity = "none"
+
+    return {
+        "detective_highlighted": bool(raw_signal.get("detective_highlighted", False)),
+        "suspect_self_contradicted": bool(raw_signal.get("suspect_self_contradicted", False)),
+        "severity": severity,
+        "prior_claim": norm(raw_signal.get("prior_claim", "")),
+        "current_claim": norm(raw_signal.get("current_claim", "")),
+        "reason": norm(raw_signal.get("reason", "")),
     }
 
 def _sanitize_interrogation_signal(
@@ -700,6 +798,100 @@ def llm_evaluate_interrogation(
         return _sanitize_interrogation_signal(case_data, raw_signal)
     except Exception:
         return _fallback_interrogation_signal(case_data, history, user_text)
+
+def llm_evaluate_dialogue_contradiction(
+    history: List[Dict[str, Any]],
+    user_text: str,
+    suspect_text: str,
+) -> Dict[str, Any]:
+    current_suspect_text = norm(suspect_text)
+    if not current_suspect_text:
+        return _empty_dialogue_contradiction_signal("empty suspect reply")
+
+    dialogue_payload = _dialogue_turn_payload(history, limit=8)
+    prior_suspect_turns = [turn for turn in dialogue_payload if turn.get("suspect_text")]
+    if not prior_suspect_turns:
+        return _empty_dialogue_contradiction_signal("no prior suspect statements")
+
+    payload = {
+        "history": dialogue_payload,
+        "current_detective_text": norm(user_text),
+        "current_suspect_text": current_suspect_text,
+    }
+
+    system = (
+        "You evaluate interrogation dialogue for self-contradictions.\n"
+        "Return only JSON.\n"
+        "Look for contradictions between the suspect's earlier statements in history and the current turn.\n"
+        "detective_highlighted is true only if the detective's latest question clearly points out or strongly implies a contradiction.\n"
+        "suspect_self_contradicted is true only if the suspect's new reply directly conflicts with an earlier suspect claim.\n"
+        "Do not flag mere elaboration, clarification, or added detail unless both claims cannot both be true.\n"
+        "Focus on alibi, time, place, action, presence, and who the suspect met.\n"
+        "Severity guide:\n"
+        "- none: no contradiction\n"
+        "- low: weak or ambiguous mismatch\n"
+        "- medium: clear mismatch on one important detail\n"
+        "- high: direct alibi, location, or action contradiction\n"
+        "prior_claim should summarize the earlier suspect claim that conflicts.\n"
+        "current_claim should summarize the current turn's conflicting claim.\n"
+    )
+
+    try:
+        resp = client.responses.create(
+            model=LLM_MODEL,
+            input=[
+                {"role": "system", "content": system},
+                {
+                    "role": "user",
+                    "content": json.dumps(payload, ensure_ascii=False, indent=2),
+                },
+            ],
+            text={
+                "format": {
+                    "type": "json_schema",
+                    "name": "dialogue_contradiction",
+                    "strict": True,
+                    "schema": DIALOGUE_CONTRADICTION_SCHEMA,
+                }
+            },
+            max_output_tokens=250,
+            store=False,
+        )
+        raw_signal = safe_json_loads((resp.output_text or "").strip(), {})
+        return _sanitize_dialogue_contradiction_signal(raw_signal)
+    except Exception:
+        return _empty_dialogue_contradiction_signal("dialogue contradiction eval failed")
+
+def apply_dialogue_contradiction_bonus(
+    pressure_delta: float,
+    confession_probability: float,
+    dialogue_signal: Optional[Dict[str, Any]],
+    confession_triggered: bool,
+) -> Tuple[float, float]:
+    if not isinstance(dialogue_signal, dict):
+        return clamp01(pressure_delta), clamp01(confession_probability)
+
+    severity = str(dialogue_signal.get("severity", "none")).strip().lower()
+    if severity not in {"none", "low", "medium", "high"}:
+        severity = "none"
+
+    pressure_bonus = 0.0
+    confession_bonus = 0.0
+
+    if dialogue_signal.get("detective_highlighted"):
+        pressure_bonus += DIALOGUE_CONTRADICTION_PRESSURE_BONUS["detective_highlighted"][severity]
+        confession_bonus += DIALOGUE_CONTRADICTION_CONFESSION_BONUS["detective_highlighted"][severity]
+
+    if dialogue_signal.get("suspect_self_contradicted"):
+        pressure_bonus += DIALOGUE_CONTRADICTION_PRESSURE_BONUS["suspect_self_contradicted"][severity]
+        confession_bonus += DIALOGUE_CONTRADICTION_CONFESSION_BONUS["suspect_self_contradicted"][severity]
+
+    boosted_pressure = clamp01(min(0.20, pressure_delta + pressure_bonus))
+    boosted_probability = clamp01(confession_probability + confession_bonus)
+    if not confession_triggered and boosted_probability >= 0.85:
+        boosted_probability = 0.84
+
+    return boosted_pressure, boosted_probability
 
 def _count_meaningful_turns(history: List[Dict[str, Any]], user_text: str) -> int:
     seen = set()
@@ -1924,6 +2116,17 @@ async def interrogation_qna(
             )
 
         suspect_text = trim_to_1_3_sentences(suspect_text)
+        dialogue_contradiction_signal = llm_evaluate_dialogue_contradiction(
+            history,
+            final_user_text,
+            suspect_text,
+        )
+        pressure_delta, confession_probability = apply_dialogue_contradiction_bonus(
+            pressure_delta,
+            confession_probability,
+            dialogue_contradiction_signal,
+            confession_triggered,
+        )
 
         # 5) TTS
         wav_b64 = await tts_to_b64(suspect_text)
