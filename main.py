@@ -377,8 +377,11 @@ CONFESSION_LEVEL_BONUS = {
     "high": 0.02,
 }
 
+NEW_EVIDENCE_PRESSURE_DELTA = 0.20
+REPEATED_EVIDENCE_PRESSURE_DELTA = 0.08
 NEW_CONTRADICTION_PRESSURE_DELTA = 0.10
 REPEATED_CONTRADICTION_PRESSURE_DELTA = 0.05
+MAX_TURN_PRESSURE_DELTA = 0.30
 
 DIALOGUE_CONTRADICTION_PRESSURE_BONUS = {
     "detective_highlighted": {
@@ -1224,8 +1227,8 @@ def calc_pressure_and_prob_v2(
 
     pressure_level = signal["current_turn"].get("pressure_level", "none")
     pressure_delta = (
-        0.04 * len(new_evidence_ids)
-        + 0.01 * len(repeated_evidence_ids)
+        NEW_EVIDENCE_PRESSURE_DELTA * len(new_evidence_ids)
+        + REPEATED_EVIDENCE_PRESSURE_DELTA * len(repeated_evidence_ids)
         + NEW_CONTRADICTION_PRESSURE_DELTA * len(new_contradiction_ids)
         + REPEATED_CONTRADICTION_PRESSURE_DELTA * len(repeated_contradiction_ids)
         + PRESSURE_LEVEL_BONUS.get(pressure_level, 0.0)
@@ -1236,7 +1239,7 @@ def calc_pressure_and_prob_v2(
     elif detect_repeat(history, user_text):
         pressure_delta *= 0.35
 
-    pressure_delta = clamp01(min(0.20, pressure_delta))
+    pressure_delta = clamp01(min(MAX_TURN_PRESSURE_DELTA, pressure_delta))
 
     meaningful_turns = _count_meaningful_turns(history, user_text)
     computed_probability = (
