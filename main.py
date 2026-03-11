@@ -377,18 +377,21 @@ CONFESSION_LEVEL_BONUS = {
     "high": 0.02,
 }
 
+NEW_CONTRADICTION_PRESSURE_DELTA = 0.10
+REPEATED_CONTRADICTION_PRESSURE_DELTA = 0.05
+
 DIALOGUE_CONTRADICTION_PRESSURE_BONUS = {
     "detective_highlighted": {
         "none": 0.0,
         "low": 0.02,
-        "medium": 0.06,
-        "high": 0.10,
+        "medium": 0.05,
+        "high": 0.07,
     },
     "suspect_self_contradicted": {
         "none": 0.0,
-        "low": 0.04,
-        "medium": 0.10,
-        "high": 0.16,
+        "low": 0.05,
+        "medium": 0.08,
+        "high": 0.10,
     },
 }
 
@@ -892,16 +895,27 @@ def apply_dialogue_contradiction_bonus(
     if severity not in {"none", "low", "medium", "high"}:
         severity = "none"
 
-    pressure_bonus = 0.0
-    confession_bonus = 0.0
+    pressure_bonus_candidates = [0.0]
+    confession_bonus_candidates = [0.0]
 
     if dialogue_signal.get("detective_highlighted"):
-        pressure_bonus += DIALOGUE_CONTRADICTION_PRESSURE_BONUS["detective_highlighted"][severity]
-        confession_bonus += DIALOGUE_CONTRADICTION_CONFESSION_BONUS["detective_highlighted"][severity]
+        pressure_bonus_candidates.append(
+            DIALOGUE_CONTRADICTION_PRESSURE_BONUS["detective_highlighted"][severity]
+        )
+        confession_bonus_candidates.append(
+            DIALOGUE_CONTRADICTION_CONFESSION_BONUS["detective_highlighted"][severity]
+        )
 
     if dialogue_signal.get("suspect_self_contradicted"):
-        pressure_bonus += DIALOGUE_CONTRADICTION_PRESSURE_BONUS["suspect_self_contradicted"][severity]
-        confession_bonus += DIALOGUE_CONTRADICTION_CONFESSION_BONUS["suspect_self_contradicted"][severity]
+        pressure_bonus_candidates.append(
+            DIALOGUE_CONTRADICTION_PRESSURE_BONUS["suspect_self_contradicted"][severity]
+        )
+        confession_bonus_candidates.append(
+            DIALOGUE_CONTRADICTION_CONFESSION_BONUS["suspect_self_contradicted"][severity]
+        )
+
+    pressure_bonus = min(0.10, max(pressure_bonus_candidates))
+    confession_bonus = max(confession_bonus_candidates)
 
     boosted_pressure = clamp01(min(0.20, pressure_delta + pressure_bonus))
     boosted_probability = clamp01(confession_probability + confession_bonus)
@@ -1212,8 +1226,8 @@ def calc_pressure_and_prob_v2(
     pressure_delta = (
         0.04 * len(new_evidence_ids)
         + 0.01 * len(repeated_evidence_ids)
-        + 0.14 * len(new_contradiction_ids)
-        + 0.03 * len(repeated_contradiction_ids)
+        + NEW_CONTRADICTION_PRESSURE_DELTA * len(new_contradiction_ids)
+        + REPEATED_CONTRADICTION_PRESSURE_DELTA * len(repeated_contradiction_ids)
         + PRESSURE_LEVEL_BONUS.get(pressure_level, 0.0)
     )
 
@@ -2137,6 +2151,181 @@ def llm_suspect_answer(
             out = _generate_suspect_reply(final_retry_user, 180)
 
     return out or "죄송하지만 그 질문에는 바로 답드리기 어렵습니다."
+
+# Override the slow post-answer evaluators with local heuristics.
+_CONTRADICTION_CUE_PATTERNS = (
+    "아까", "방금", "전에", "처음엔", "그런데", "근데", "모순", "말이다르",
+    "말이다르잖", "했잖", "라면서", "라고했", "아니라며", "왜이제", "왜지금",
+)
+_HOME_REST_PATTERNS = ("자고있", "잤", "집에있", "집에만있", "안나갔", "밖에안나갔")
+_PRESENCE_DENY_PATTERNS = ("안갔", "간적없", "간일없", "안왔", "안들렀", "방문안")
+_PRESENCE_ADMIT_PATTERNS = ("갔", "가서", "왔", "들렀", "방문", "찾아갔", "확인하러", "나갔")
+_MEET_DENY_PATTERNS = ("안만났", "만난적없", "본적없", "마주친적없", "연락안했")
+_MEET_ADMIT_PATTERNS = ("만났", "봤", "마주쳤", "연락했", "통화했")
+_ALONE_PATTERNS = ("혼자있", "혼자였", "저혼자")
+_WITH_OTHER_PATTERNS = ("같이있", "함께있", "둘이있", "누구랑있", "누구와있")
+_REPLY_SCOPE_MARKERS = ("메신저", "문자", "카톡", "대화", "말", "문구", "뜻", "의미")
+_BACKGROUND_DETAIL_MARKERS = (
+    "전날", "어제", "오늘", "회의실", "사무실", "회사", "집", "골목", "주차장",
+    "카페", "술집", "대표권", "말다툼", "목소리", "전화", "따로", "현장",
+)
+_TOKEN_STOPWORDS = {
+    "그", "그거", "그건", "그게", "이", "이거", "이건", "저", "저는", "제가",
+    "당신", "당신이", "그때", "지금", "왜", "뭐", "무슨", "어떻게", "그리고",
+    "근데", "그런데", "그냥", "정말", "진짜", "그말", "그문구", "그메시지",
+}
+
+def _split_short_sentences(text: str) -> List[str]:
+    parts = re.split(r"(?<=[\.!\?])\s+|(?<=[다요니다까])\s+", norm(text))
+    return [part.strip() for part in parts if part and part.strip()]
+
+def _tokenize_koreanish(text: str) -> List[str]:
+    tokens = re.findall(r"[0-9A-Za-z가-힣]+", norm(text))
+    return [
+        token for token in tokens
+        if len(token) >= 2 and token not in _TOKEN_STOPWORDS
+    ]
+
+def _squash_korean_text(text: str) -> str:
+    return re.sub(r"[^0-9A-Za-z가-힣]+", "", norm(text).lower())
+
+def _contains_any_match(text: str, patterns: Tuple[str, ...]) -> bool:
+    target = _squash_korean_text(text)
+    return any(pattern in target for pattern in patterns)
+
+def _extract_dialogue_flags(text: str) -> Dict[str, bool]:
+    target = _squash_korean_text(text)
+    presence_denied = any(pattern in target for pattern in _PRESENCE_DENY_PATTERNS)
+    meet_denied = any(pattern in target for pattern in _MEET_DENY_PATTERNS)
+    return {
+        "home_rest": any(pattern in target for pattern in _HOME_REST_PATTERNS),
+        "presence_denied": presence_denied,
+        "presence_admitted": (not presence_denied) and any(
+            pattern in target for pattern in _PRESENCE_ADMIT_PATTERNS
+        ),
+        "meet_denied": meet_denied,
+        "meet_admitted": (not meet_denied) and any(
+            pattern in target for pattern in _MEET_ADMIT_PATTERNS
+        ),
+        "alone": any(pattern in target for pattern in _ALONE_PATTERNS),
+        "with_other": any(pattern in target for pattern in _WITH_OTHER_PATTERNS),
+    }
+
+def llm_review_suspect_reply(user_text: str, suspect_text: str) -> Dict[str, Any]:
+    detective_text = norm(user_text)
+    reply_text = norm(suspect_text)
+    if not reply_text:
+        return _default_suspect_reply_review(
+            "empty suspect reply",
+            answers_question_directly=False,
+        )
+
+    sentences = _split_short_sentences(reply_text)
+    first_sentence = sentences[0] if sentences else reply_text
+    remaining = " ".join(sentences[1:]).strip()
+    question_tokens = set(_tokenize_koreanish(detective_text))
+    first_tokens = set(_tokenize_koreanish(first_sentence))
+    remaining_tokens = set(_tokenize_koreanish(remaining))
+    overlap_first = len(question_tokens & first_tokens)
+    overlap_remaining = len(question_tokens & remaining_tokens)
+
+    quote_or_message_question = (
+        any(marker in detective_text for marker in _REPLY_SCOPE_MARKERS)
+        or "\"" in detective_text
+        or "'" in detective_text
+    )
+    direct_explanation = any(marker in first_sentence for marker in ("뜻", "의미", "아니", "아닙", "그말은", "그건"))
+    evasive = _is_overly_evasive_answer(reply_text)
+
+    answers_question_directly = not evasive
+    if quote_or_message_question:
+        answers_question_directly = direct_explanation or overlap_first > 0
+    elif overlap_first == 0 and len(first_sentence) > 24 and not direct_explanation:
+        answers_question_directly = False
+
+    introduces_unrelated_details = False
+    if remaining:
+        remaining_has_background = any(marker in remaining for marker in _BACKGROUND_DETAIL_MARKERS)
+        if remaining_has_background and overlap_remaining == 0:
+            introduces_unrelated_details = True
+        elif len(sentences) >= 3 and overlap_remaining <= 1:
+            introduces_unrelated_details = True
+        elif len(remaining) >= 28 and overlap_remaining == 0 and quote_or_message_question:
+            introduces_unrelated_details = True
+
+    evades_core_issue = evasive or (not answers_question_directly and not introduces_unrelated_details)
+    reason_parts: List[str] = []
+    if not answers_question_directly:
+        reason_parts.append("reply does not directly address the latest question first")
+    if introduces_unrelated_details:
+        reason_parts.append("reply adds unrelated background details")
+    if evades_core_issue:
+        reason_parts.append("reply stays too indirect or evasive")
+
+    return {
+        "answers_question_directly": answers_question_directly,
+        "introduces_unrelated_details": introduces_unrelated_details,
+        "evades_core_issue": evades_core_issue,
+        "reason": "; ".join(reason_parts),
+    }
+
+def llm_evaluate_dialogue_contradiction(
+    history: List[Dict[str, Any]],
+    user_text: str,
+    suspect_text: str,
+) -> Dict[str, Any]:
+    current_suspect_text = norm(suspect_text)
+    if not current_suspect_text:
+        return _empty_dialogue_contradiction_signal("empty suspect reply")
+
+    current_flags = _extract_dialogue_flags(current_suspect_text)
+    if not any(current_flags.values()):
+        return _empty_dialogue_contradiction_signal("no contradiction slots in current reply")
+
+    detective_highlighted = _contains_any_match(user_text, _CONTRADICTION_CUE_PATTERNS)
+    prior_turns = [
+        norm(entry.get("suspect_text", ""))
+        for entry in history[-8:]
+        if isinstance(entry, dict) and norm(entry.get("suspect_text", ""))
+    ]
+    if not prior_turns:
+        return _empty_dialogue_contradiction_signal("no prior suspect statements")
+
+    for prior_text in reversed(prior_turns):
+        prior_flags = _extract_dialogue_flags(prior_text)
+        severity = "none"
+
+        if current_flags["presence_admitted"] and (prior_flags["presence_denied"] or prior_flags["home_rest"]):
+            severity = "high"
+        elif (current_flags["presence_denied"] or current_flags["home_rest"]) and prior_flags["presence_admitted"]:
+            severity = "high"
+        elif current_flags["meet_admitted"] and prior_flags["meet_denied"]:
+            severity = "high"
+        elif current_flags["meet_denied"] and prior_flags["meet_admitted"]:
+            severity = "high"
+        elif current_flags["alone"] and prior_flags["with_other"]:
+            severity = "medium"
+        elif current_flags["with_other"] and prior_flags["alone"]:
+            severity = "medium"
+
+        if severity != "none":
+            return {
+                "detective_highlighted": detective_highlighted,
+                "suspect_self_contradicted": True,
+                "severity": severity,
+                "prior_claim": prior_text,
+                "current_claim": current_suspect_text,
+                "reason": "local heuristic contradiction detected",
+            }
+
+    return {
+        "detective_highlighted": False,
+        "suspect_self_contradicted": False,
+        "severity": "none",
+        "prior_claim": "",
+        "current_claim": "",
+        "reason": "no local contradiction detected",
+    }
 
 def llm_confession(case_context: str, history: List[Dict[str, Any]], user_text: str) -> str:
     system = (
