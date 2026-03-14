@@ -42,7 +42,7 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 # =========================================================
 STT_PRIMARY = "gpt-4o-mini-transcribe"
 STT_FALLBACK = "whisper-1"
-LLM_MODEL = "gpt-5.2"
+LLM_MODEL = "gpt-5.4-2026-03-05"
 TTS_MODEL = "gpt-4o-mini-tts"
 TTS_VOICE = "verse"
 
