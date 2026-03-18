@@ -324,6 +324,9 @@ MAX_GAME_TURNS = 10
 STRESS_IDLE_DECAY = 0.01
 STRESS_WEAK_TURN_DECAY = 0.003
 STRESS_REPEAT_DECAY = 0.01
+CORE_QUESTION_CONFESSION_BONUS = 0.03
+NEW_EVIDENCE_DIRECT_CONFESSION_BONUS = 0.04
+NEW_CONTRADICTION_DIRECT_CONFESSION_BONUS = 0.08
 
 DIALOGUE_CONTRADICTION_PRESSURE_BONUS = {
     "detective_highlighted": {
@@ -863,10 +866,10 @@ def _empty_question_analysis(reason: str = "") -> Dict[str, Any]:
 
 QUESTION_SLOT_HINTS: Dict[str, Tuple[str, ...]] = {
     "crime_time": ("언제", "몇 시", "시각", "시간", "타임", "time", "clock"),
-    "crime_place": ("어디", "장소", "현장", "place", "location"),
+    "crime_place": ("어디", "장소", "현장", "place", "location", "복도", "편의점", "공장", "거기", "찍혔", "목격"),
     "weapon": ("무기", "흉기", "칼", "weapon"),
     "victim_relation": ("피해자", "관계", "사이", "relation"),
-    "alibi_claim": ("알리바이", "뭐 했", "어디 있었", "집에", "alibi"),
+    "alibi_claim": ("알리바이", "뭐 했", "어디 있었", "집에", "alibi", "아까", "했다며", "있다 했", "있었다 했", "cctv에 찍혔", "찍혔던데"),
     "actual_action": ("무슨 짓", "무엇을 했", "행동", "actual action"),
     "last_seen_place": ("마지막", "봤던 곳", "last seen"),
     "met_victim_that_day": ("만났", "봤", "접촉", "met", "seen"),
@@ -881,6 +884,17 @@ QUESTION_INTENT_BY_SLOT = {
     "actual_action": "ask_action",
     "last_seen_place": "ask_last_seen_place",
     "met_victim_that_day": "ask_meeting",
+}
+
+SLOT_HINT_PRIORITY = {
+    "crime_place": 4,
+    "alibi_claim": 3,
+    "last_seen_place": 3,
+    "crime_time": 2,
+    "actual_action": 2,
+    "victim_relation": 1,
+    "weapon": 1,
+    "met_victim_that_day": 1,
 }
 
 SMALL_TALK_HINTS = (
@@ -950,10 +964,17 @@ def _sanitize_question_analysis(
 
 def _detect_slot_from_text(text: str) -> Optional[str]:
     normalized = norm(text).lower()
+    best_slot = None
+    best_score = 0
+    best_priority = -1
     for slot_name, patterns in QUESTION_SLOT_HINTS.items():
-        if any(pattern in normalized for pattern in patterns):
-            return slot_name
-    return None
+        score = sum(1 for pattern in patterns if pattern in normalized)
+        priority = SLOT_HINT_PRIORITY.get(slot_name, 0)
+        if score > best_score or (score > 0 and score == best_score and priority > best_priority):
+            best_slot = slot_name
+            best_score = score
+            best_priority = priority
+    return best_slot if best_score > 0 else None
 
 def _backfill_question_analysis(
     case_data: Optional[Dict[str, Any]],
@@ -1801,9 +1822,16 @@ def evaluate_interrogation_progress_v3(
         len(cumulative_contradiction_ids),
         latest_sue_impact,
     )
+    direct_bonus = 0.0
+    if signal.get("intent") in {"ask_time", "ask_place", "ask_alibi", "ask_action"}:
+        direct_bonus += CORE_QUESTION_CONFESSION_BONUS
+    if new_evidence_ids:
+        direct_bonus += NEW_EVIDENCE_DIRECT_CONFESSION_BONUS
+    if new_contradiction_ids:
+        direct_bonus += NEW_CONTRADICTION_DIRECT_CONFESSION_BONUS
     confession_probability = _cap_turn_confession_probability(
         prior_confession_probability,
-        confession_probability,
+        confession_probability + direct_bonus,
     )
 
     if detect_repeat(history, user_text):
@@ -2375,6 +2403,9 @@ def _build_suspect_answer_system_prompt() -> str:
         "Do not mention evidence the detective has not brought up yet.\n"
         "Do not volunteer hidden truth-slot information unless the detective directly asks about that specific point.\n"
         "Do not fully confess unless the confession trigger is reached.\n"
+        "If this is the first turn, do not imply that you already explained it before.\n"
+        "Do not say phrases like '말씀드렸습니다', '아까 말했다', '전에 말했다', or '이미 말했듯이' unless such dialogue actually exists in history.\n"
+        "When history is empty, answer as if this is the first time you are responding.\n"
     )
 
 def _build_confession_system_prompt() -> str:
@@ -2441,6 +2472,10 @@ def llm_suspect_answer(
         extra_guard += "\n- If the question is vague, ask what point the detective wants clarified."
     if detect_repeat(history, user_text):
         extra_guard += "\n- If the same question is repeated, answer that same point plainly."
+    if not hist_lines:
+        extra_guard += "\n- This is the first reply in the interrogation."
+        extra_guard += "\n- Do not imply any prior explanation or prior statement."
+        extra_guard += "\n- Do not use phrases like '말씀드렸습니다', '아까 말했다', '전에 말했다', or '이미 말했듯이'."
 
     user = (
         case_context
@@ -2499,19 +2534,34 @@ def llm_suspect_answer(
         retry_user = user + "\n\n[Correction] " + " ".join(warnings)
         out = _generate_suspect_reply(retry_user, 200)
 
+    if not hist_lines:
+        replacements = {
+            "아까 말씀드렸듯이": "",
+            "전에 말씀드렸듯이": "",
+            "이미 말씀드렸지만": "",
+            "계속 말씀드리지만": "",
+            "말씀드렸습니다": "말씀드립니다",
+            "말씀드린 대로": "제 말씀은",
+        }
+        for old, new in replacements.items():
+            out = out.replace(old, new)
+        out = norm(out)
+
     return out or "죄송하지만 그 질문에는 바로 답드리기 어렵습니다."
 
 _CONTRADICTION_CUE_PATTERNS = (
     "아까", "방금", "전에", "처음엔", "그런데", "근데", "모순", "말이다르",
-    "말이다르잖", "했잖", "라면서", "라고했", "아니라며", "왜이제", "왜지금",
+    "말이다르잖", "했잖", "했다며", "했는데", "찍혔던데", "라면서", "라고했", "아니라며", "왜이제", "왜지금",
 )
 _HOME_REST_PATTERNS = ("자고있", "잤", "집에있", "집에만있", "안나갔", "밖에안나갔")
 _PRESENCE_DENY_PATTERNS = ("안갔", "간적없", "간일없", "안왔", "안들렀", "방문안")
-_PRESENCE_ADMIT_PATTERNS = ("갔", "가서", "왔", "들렀", "방문", "찾아갔", "확인하러", "나갔")
+_PRESENCE_ADMIT_PATTERNS = ("갔", "가서", "왔", "들렀", "방문", "찾아갔", "확인하러", "나갔", "올라갔", "올라간", "올라가")
 _MEET_DENY_PATTERNS = ("안만났", "만난적없", "본적없", "마주친적없", "연락안했")
 _MEET_ADMIT_PATTERNS = ("만났", "봤", "마주쳤", "연락했", "통화했")
 _ALONE_PATTERNS = ("혼자있", "혼자였", "저혼자")
 _WITH_OTHER_PATTERNS = ("같이있", "함께있", "둘이있", "누구랑있", "누구와있")
+_EXCLUSIVE_LOCATION_PATTERNS = ("에만 있었", "거기에만 있었", "밖에 없었", "줄곧 있었")
+_CORRECTION_PATTERNS = ("정확하지 않았", "잘못 말했", "아까 말은", "정정하겠습니다", "맞지만")
 _REPLY_SCOPE_MARKERS = ("메신저", "문자", "카톡", "대화", "말", "문구", "뜻", "의미")
 _BACKGROUND_DETAIL_MARKERS = (
     "전날", "어제", "오늘", "회의실", "사무실", "회사", "집", "골목", "주차장",
@@ -2522,6 +2572,24 @@ _TOKEN_STOPWORDS = {
     "당신", "당신이", "그때", "지금", "왜", "뭐", "무슨", "어떻게", "그리고",
     "근데", "그런데", "그냥", "정말", "진짜", "그말", "그문구", "그메시지",
 }
+
+_DIALOGUE_PLACE_KEYWORDS = (
+    "공장 복도",
+    "병원 쪽",
+    "창고 근처",
+    "편의점",
+    "공장",
+    "복도",
+    "병원",
+    "집",
+    "회사",
+    "사무실",
+    "창고",
+    "주차장",
+    "골목",
+    "항만",
+    "공원",
+)
 
 def _split_short_sentences(text: str) -> List[str]:
     parts = re.split(r"(?<=[\.!\?])\s+|(?<=[다요니다까])\s+", norm(text))
@@ -2542,14 +2610,16 @@ def _contains_any_match(text: str, patterns: Tuple[str, ...]) -> bool:
     return any(pattern in target for pattern in patterns)
 
 def _extract_dialogue_flags(text: str) -> Dict[str, bool]:
+    normalized = norm(text)
     target = _squash_korean_text(text)
     presence_denied = any(pattern in target for pattern in _PRESENCE_DENY_PATTERNS)
     meet_denied = any(pattern in target for pattern in _MEET_DENY_PATTERNS)
+    exclusive_location = any(pattern in normalized for pattern in _EXCLUSIVE_LOCATION_PATTERNS)
     return {
         "home_rest": any(pattern in target for pattern in _HOME_REST_PATTERNS),
         "presence_denied": presence_denied,
-        "presence_admitted": (not presence_denied) and any(
-            pattern in target for pattern in _PRESENCE_ADMIT_PATTERNS
+        "presence_admitted": (not presence_denied) and (
+            any(pattern in target for pattern in _PRESENCE_ADMIT_PATTERNS) or exclusive_location
         ),
         "meet_denied": meet_denied,
         "meet_admitted": (not meet_denied) and any(
@@ -2557,7 +2627,25 @@ def _extract_dialogue_flags(text: str) -> Dict[str, bool]:
         ),
         "alone": any(pattern in target for pattern in _ALONE_PATTERNS),
         "with_other": any(pattern in target for pattern in _WITH_OTHER_PATTERNS),
+        "exclusive_location": exclusive_location,
+        "correction": any(pattern in normalized for pattern in _CORRECTION_PATTERNS),
     }
+
+def _extract_dialogue_place(text: str) -> str:
+    normalized = norm(text)
+    if not normalized:
+        return ""
+
+    for place in _DIALOGUE_PLACE_KEYWORDS:
+        if place in normalized:
+            return place
+
+    squashed = _normalize_place_text(normalized)
+    for place in _DIALOGUE_PLACE_KEYWORDS:
+        place_squashed = _normalize_place_text(place)
+        if place_squashed and place_squashed in squashed:
+            return place
+    return ""
 
 def llm_review_suspect_reply(user_text: str, suspect_text: str) -> Dict[str, Any]:
     detective_text = norm(user_text)
@@ -2627,7 +2715,8 @@ def llm_evaluate_dialogue_contradiction(
         return _empty_dialogue_contradiction_signal("empty suspect reply")
 
     current_flags = _extract_dialogue_flags(current_suspect_text)
-    if not any(current_flags.values()):
+    current_place = _extract_dialogue_place(current_suspect_text)
+    if not any(current_flags.values()) and not current_place:
         return _empty_dialogue_contradiction_signal("no contradiction slots in current reply")
 
     detective_highlighted = _contains_any_match(user_text, _CONTRADICTION_CUE_PATTERNS)
@@ -2641,7 +2730,27 @@ def llm_evaluate_dialogue_contradiction(
 
     for prior_text in reversed(prior_turns):
         prior_flags = _extract_dialogue_flags(prior_text)
+        prior_place = _extract_dialogue_place(prior_text)
         severity = "none"
+
+        if (
+            current_place
+            and prior_place
+            and not _slot_values_match(current_place, prior_place, "crime_place")
+        ):
+            severity = "high" if (
+                current_flags.get("correction")
+                or current_flags.get("exclusive_location")
+                or prior_flags.get("exclusive_location")
+            ) else "medium"
+            return {
+                "detective_highlighted": detective_highlighted,
+                "suspect_self_contradicted": True,
+                "severity": severity,
+                "prior_claim": prior_text,
+                "current_claim": current_suspect_text,
+                "reason": f"place changed from {prior_place} to {current_place}",
+            }
 
         if current_flags["presence_admitted"] and (prior_flags["presence_denied"] or prior_flags["home_rest"]):
             severity = "high"
