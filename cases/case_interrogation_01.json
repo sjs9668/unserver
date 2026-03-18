@@ -1,48 +1,75 @@
 {
   "case_id": "case_001",
-
   "overview": {
-    "time": "2026-01-12 23:00",
-    "place": "주택가 골목",
-    "type": "강도 살인 미수"
+    "time": "2026-01-12 23:10",
+    "place": "항만 창고 뒤편",
+    "type": "협박 중 살인"
   },
-
-  "motive": "금전적 곤궁으로 인한 충동 범행",
-
-  "crime_flow": "용의자는 밤 11시경 주택가 골목에서 귀가 중이던 피해자를 위협해 금품을 빼앗으려 했다. 피해자가 저항하자 흉기를 휘둘렀고, 중상을 입혔으나 사망에는 이르지 않았다. 이후 용의자는 현장을 벗어났다.",
-
+  "motive": "빚 독촉 끝에 피해자와 다투다가 범행이 벌어졌다.",
+  "crime_flow": "용의자는 23시 10분쯤 항만 창고 뒤편에서 피해자를 만나 돈 문제로 언성을 높였고, 실랑이 끝에 접이식 칼로 위협하다 치명상을 입혔다. 이후 급히 현장을 벗어나 집에 있었다는 알리바이를 꾸몄다.",
   "suspect": {
-    "name": "김철수",
+    "name": "김천수",
     "age": 34,
-    "job": "무직",
-    "relation": "피해자와 일면식 없음"
+    "job": "중고차 딜러",
+    "relation": "돈 문제로 얽힌 지인"
   },
-
-  "false_statement": "사건 발생 시각에 집에 있었으며 외출한 적이 없다.",
-
+  "false_statement": "사건 시간에는 집에 있었고 피해자를 만나지 않았습니다.",
+  "truth_slots": {
+    "crime_time": "23:10",
+    "crime_place": "항만 창고 뒤편",
+    "weapon": "접이식 칼",
+    "victim_relation": "돈 문제로 얽힌 지인",
+    "alibi_claim": "집에 있었다",
+    "actual_action": "피해자를 만나 돈을 요구하다 접이식 칼로 위협했다",
+    "last_seen_place": "항만 창고 뒤편",
+    "met_victim_that_day": "yes"
+  },
   "evidences": [
     {
-      "id": "cctv_01",
-      "name": "골목 CCTV",
-      "description": "사건 발생 시각인 23시 10분경, 용의자의 체형과 유사한 인물이 골목을 통과하는 장면이 촬영됨"
+      "id": "e1",
+      "name": "창고 CCTV",
+      "description": "23시 10분경 용의자와 비슷한 체형의 남성이 항만 창고 뒤편으로 들어가는 장면이 찍혔다."
     },
     {
-      "id": "knife_01",
-      "name": "흉기",
-      "description": "사건 현장 인근에서 발견된 칼에 피해자의 혈흔이 묻어 있음"
+      "id": "e2",
+      "name": "혈흔 묻은 접이식 칼",
+      "description": "현장 근처 배수로에서 피해자 혈흔이 묻은 접이식 칼이 발견됐다."
+    },
+    {
+      "id": "e3",
+      "name": "휴대폰 위치 기록",
+      "description": "용의자 휴대폰은 사건 시각 항만 창고 기지국에 접속했다."
+    },
+    {
+      "id": "e4",
+      "name": "피해자 메시지",
+      "description": "피해자는 사건 직전 '창고 뒤에서 보자'라는 메시지를 용의자에게 보냈다."
     }
   ],
-
   "contradictions": [
     {
-      "id": "time_mismatch",
-      "description": "용의자는 23시에 집에 있었다고 주장하지만, CCTV에는 23시 10분에 골목을 지나는 인물이 포착됨",
-      "related_evidence": ["cctv_01"]
+      "id": "c1",
+      "description": "용의자는 집에 있었다고 했지만 CCTV와 위치 기록은 항만 창고 뒤편에 있었다는 점을 가리킨다.",
+      "related_evidence": ["e1", "e3"],
+      "slot": "crime_place",
+      "truth_value": "항만 창고 뒤편",
+      "contradiction_type": "claim_vs_evidence"
     },
     {
-      "id": "weapon_denial",
-      "description": "용의자는 흉기를 소지한 적이 없다고 말하지만, 현장에서 발견된 칼과 체형·이동 경로가 일치함",
-      "related_evidence": ["knife_01"]
+      "id": "c2",
+      "description": "용의자는 피해자를 만나지 않았다고 했지만 피해자 메시지와 현장 동선은 당일 만남을 보여준다.",
+      "related_evidence": ["e4"],
+      "slot": "met_victim_that_day",
+      "truth_value": "yes",
+      "contradiction_type": "claim_vs_evidence"
+    },
+    {
+      "id": "c3",
+      "description": "용의자는 무기를 본 적 없다고 했지만 현장 인근에서 발견된 접이식 칼은 범행 도구와 일치한다.",
+      "related_evidence": ["e2"],
+      "slot": "weapon",
+      "truth_value": "접이식 칼",
+      "contradiction_type": "claim_vs_evidence"
     }
   ]
 }
