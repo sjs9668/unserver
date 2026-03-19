@@ -87,20 +87,6 @@ CASE_VARIANT_BLUEPRINTS: List[Dict[str, Any]] = [
         "allow_fire": False,
     },
     {
-        "label": "독살 미수",
-        "type_hint": "독살 미수",
-        "place_hint": "식당 주방, 사무실 탕비실, 가족 식사 자리",
-        "motive_hint": "유산, 원한, 관계 파탄에 따른 계획적 범행",
-        "allow_fire": False,
-    },
-    {
-        "label": "유괴 감금",
-        "type_hint": "유괴 및 감금",
-        "place_hint": "모텔, 외곽 창고, 지하 작업실",
-        "motive_hint": "금전 요구, 보복, 비밀을 막기 위한 통제",
-        "allow_fire": False,
-    },
-    {
         "label": "횡령 은폐",
         "type_hint": "횡령 및 증거 은닉",
         "place_hint": "중소기업 사무실, 회계팀, 창고 사무동",
@@ -129,24 +115,10 @@ CASE_VARIANT_BLUEPRINTS: List[Dict[str, Any]] = [
         "allow_fire": False,
     },
     {
-        "label": "산업 스파이",
-        "type_hint": "산업기밀 유출",
-        "place_hint": "연구실, 스타트업 사무실, 공장 설비실",
-        "motive_hint": "이직 대가, 경쟁사 거래, 승진 불만",
-        "allow_fire": False,
-    },
-    {
         "label": "스토킹 침입",
         "type_hint": "스토킹 및 주거침입",
         "place_hint": "빌라 복도, 피해자 집 앞, 지하주차장",
         "motive_hint": "집착, 거절에 대한 분노, 관계 망상",
-        "allow_fire": False,
-    },
-    {
-        "label": "보험 사기",
-        "type_hint": "보험 사기",
-        "place_hint": "병원, 공사 현장, 차량 사고 현장",
-        "motive_hint": "보험금 편취, 채무 해결, 공모 은폐",
         "allow_fire": False,
     },
     {
@@ -162,13 +134,6 @@ CASE_VARIANT_BLUEPRINTS: List[Dict[str, Any]] = [
         "place_hint": "상가 창고, 폐건물, 외곽 창고",
         "motive_hint": "보험금, 보복, 증거 인멸",
         "allow_fire": True,
-    },
-    {
-        "label": "살인 교사",
-        "type_hint": "살인 교사 미수",
-        "place_hint": "사무실, 가족 모임, 거래 현장",
-        "motive_hint": "유산, 사업권 분쟁, 관계 청산",
-        "allow_fire": False,
     },
 ]
 RECENT_CASE_TYPE_HISTORY: deque[str] = deque(maxlen=5)
