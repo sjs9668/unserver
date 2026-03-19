@@ -2305,7 +2305,7 @@ CASE_JSON_SCHEMA = {
                         "items": {"type": "string"},
                     },
                 },
-                "required": ["id", "name", "description"],
+                "required": ["id", "name", "description", "aliases"],
             },
             "minItems": 4,
             "maxItems": 5,
@@ -2504,7 +2504,7 @@ def llm_generate_case() -> Dict[str, Any]:
         "Each contradiction.slot should match the main truth slot being challenged.\n"
         "Each contradiction.truth_value should be the actual value the server can compare against.\n"
         "Use contradiction_type values such as claim_vs_evidence, claim_vs_truth, timeline_mismatch, or alibi_mismatch.\n"
-        "Each evidence item may include a short aliases array with 1 to 4 natural user-facing reference phrases such as CCTV aliases, camera aliases, or place-specific evidence nicknames.\n"
+        "Each evidence item must include an aliases array. It may be empty, or contain 1 to 4 short natural user-facing reference phrases such as CCTV aliases, camera aliases, or place-specific evidence nicknames.\n"
         "Include at least one contradiction tied to the suspect's alibi or claimed whereabouts.\n"
         "false_statement should sound plausible at first but collapse under evidence or contradiction pressure.\n"
         "crime_flow is the hidden ground truth summary.\n"
