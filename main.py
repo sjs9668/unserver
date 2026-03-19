@@ -878,7 +878,65 @@ QUESTION_SLOT_HINTS: Dict[str, Tuple[str, ...]] = {
     "crime_place": ("어디", "장소", "현장", "place", "location", "복도", "편의점", "공장", "거기", "찍혔", "목격"),
     "weapon": ("무기", "흉기", "칼", "weapon"),
     "victim_relation": ("피해자", "관계", "사이", "relation"),
-    "alibi_claim": ("알리바이", "뭐 했", "어디 있었", "집에", "alibi", "아까", "했다며", "있다 했", "있었다 했", "cctv에 찍혔", "찍혔던데"),
+    "alibi_claim": (
+        "알리바이",
+        "뭐 했",
+        "뭐하고 있었",
+        "어디 있었",
+        "어디 있었어",
+        "어디에 있었",
+        "그때 어디",
+        "그 시간",
+        "그 시간에",
+        "그때 뭐",
+        "집에",
+        "집에 있었",
+        "집에 있었다",
+        "거실",
+        "거실에 있었",
+        "거실에 있었다",
+        "식사 내내",
+        "내내",
+        "계속",
+        "줄곧",
+        "에만 있었다",
+        "에만 있었",
+        "거기 있었다",
+        "거기 있었",
+        "있었다고 했",
+        "있었다 했",
+        "있다 했",
+        "있다며",
+        "있었다며",
+        "했다며",
+        "했다고 했",
+        "라고 했",
+        "라고 했는데",
+        "했는데",
+        "라면서",
+        "없었다고 했",
+        "없었다며",
+        "아까",
+        "아까는",
+        "아까 말했다",
+        "말했잖",
+        "말이 다르",
+        "말이 다른데",
+        "말 바뀌",
+        "진술",
+        "진술이 다른데",
+        "alibi",
+        "cctv",
+        "cctv에 찍혔",
+        "cctv에 찍혔다",
+        "찍혔던데",
+        "찍혀",
+        "찍혀있",
+        "찍힌 거",
+        "찍혔는데",
+        "영상에",
+        "영상에 찍혀",
+    ),
     "actual_action": ("무슨 짓", "무엇을 했", "행동", "actual action"),
     "last_seen_place": ("마지막", "봤던 곳", "last seen"),
     "met_victim_that_day": ("만났", "봤", "접촉", "met", "seen"),
@@ -896,8 +954,8 @@ QUESTION_INTENT_BY_SLOT = {
 }
 
 SLOT_HINT_PRIORITY = {
+    "alibi_claim": 5,
     "crime_place": 4,
-    "alibi_claim": 3,
     "last_seen_place": 3,
     "crime_time": 2,
     "actual_action": 2,
@@ -985,6 +1043,69 @@ def _detect_slot_from_text(text: str) -> Optional[str]:
             best_priority = priority
     return best_slot if best_score > 0 else None
 
+def _question_has_contradiction_cues(text: str) -> bool:
+    lowered = norm(text).lower()
+    extra_cues = (
+        "했는데",
+        "했다며",
+        "라고 했는데",
+        "라면서",
+        "있었다고 했",
+        "있었다며",
+        "없었다고 했",
+        "없었다며",
+        "말이 다르",
+        "말 바뀌",
+        "진술이 다른데",
+        "찍혔",
+        "찍혀",
+        "찍혀있",
+        "영상에",
+    )
+    return any(pattern in lowered for pattern in CONTRADICTION_HINTS + ACCUSATION_HINTS + extra_cues)
+
+def _best_contradiction_slot_for_evidence(
+    case_data: Optional[Dict[str, Any]],
+    evidence_ids: List[str],
+) -> Optional[str]:
+    evidence_id_set = {
+        str(evidence_id).strip()
+        for evidence_id in (evidence_ids or [])
+        if str(evidence_id).strip()
+    }
+    if not case_data or not evidence_id_set:
+        return None
+
+    slot_scores: Dict[str, int] = {}
+    for contradiction in _case_contradictions(case_data):
+        related_evidence = {
+            str(evidence_id).strip()
+            for evidence_id in (contradiction.get("related_evidence", []) or [])
+            if str(evidence_id).strip()
+        }
+        if not related_evidence or not related_evidence.intersection(evidence_id_set):
+            continue
+
+        slot_name = str(contradiction.get("slot", "")).strip()
+        if slot_name not in TRUTH_SLOT_NAMES:
+            continue
+
+        score = 1
+        contradiction_type = norm(contradiction.get("contradiction_type", "")).lower()
+        if contradiction_type == "alibi_mismatch" and slot_name == "alibi_claim":
+            score += 2
+        elif contradiction_type in {"claim_vs_evidence", "timeline_mismatch"}:
+            score += 1
+        slot_scores[slot_name] = slot_scores.get(slot_name, 0) + score
+
+    if not slot_scores:
+        return None
+
+    return max(
+        slot_scores.items(),
+        key=lambda item: (item[1], SLOT_HINT_PRIORITY.get(item[0], 0)),
+    )[0]
+
 def _backfill_question_analysis(
     case_data: Optional[Dict[str, Any]],
     user_text: str,
@@ -993,6 +1114,7 @@ def _backfill_question_analysis(
     backfilled = dict(analysis or {})
     lexical_slot = _detect_slot_from_text(user_text)
     lexical_evidence_ids = _lexical_evidence_hits(case_data, user_text)
+    contradiction_cues = _question_has_contradiction_cues(user_text)
 
     if lexical_slot and not backfilled.get("target_slot"):
         backfilled["target_slot"] = lexical_slot
@@ -1010,6 +1132,37 @@ def _backfill_question_analysis(
             backfilled["intent"] = "present_evidence"
         if backfilled.get("pressure_level") == "none":
             backfilled["pressure_level"] = "medium"
+
+    effective_evidence_ids = uniq_strings(
+        list(backfilled.get("mentioned_evidence_ids", []) or []) + lexical_evidence_ids
+    )
+    contradiction_slot = _best_contradiction_slot_for_evidence(case_data, effective_evidence_ids)
+    current_slot = backfilled.get("target_slot")
+    if contradiction_slot:
+        override_implies_contradiction = bool(effective_evidence_ids) and current_slot not in {None, "", contradiction_slot}
+        should_override = (
+            current_slot in {None, "", "crime_place", "crime_time", "last_seen_place"}
+            or (
+                contradiction_slot == "alibi_claim"
+                and current_slot in {"actual_action", "crime_place"}
+            )
+            or (
+                contradiction_cues
+                and backfilled.get("intent") in {"present_evidence", "point_contradiction", "ask_place"}
+            )
+        )
+        if should_override and current_slot != contradiction_slot:
+            backfilled["target_slot"] = contradiction_slot
+            if contradiction_cues or override_implies_contradiction:
+                backfilled["intent"] = "point_contradiction"
+                backfilled["pressure_level"] = "high"
+            elif backfilled.get("intent") in {"irrelevant", "small_talk"}:
+                backfilled["intent"] = QUESTION_INTENT_BY_SLOT.get(contradiction_slot, "irrelevant")
+                if backfilled.get("pressure_level") == "none":
+                    backfilled["pressure_level"] = "low"
+            reason = norm(backfilled.get("reason", ""))
+            suffix = f"evidence contradiction slot override:{contradiction_slot}"
+            backfilled["reason"] = f"{reason}; {suffix}" if reason else suffix
 
     return _sanitize_question_analysis(case_data, backfilled)
 
