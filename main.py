@@ -321,6 +321,7 @@ REPEATED_CONTRADICTION_PRESSURE_DELTA = 0.04
 MAX_TURN_PRESSURE_DELTA = 0.22
 MAX_MODEL_CONFESSION_GAIN_PER_TURN = 0.22
 MAX_GAME_TURNS = 10
+CONFESSION_TRIGGER_THRESHOLD = 0.85
 STRESS_IDLE_DECAY = 0.01
 STRESS_WEAK_TURN_DECAY = 0.003
 STRESS_REPEAT_DECAY = 0.01
@@ -329,34 +330,40 @@ NEW_EVIDENCE_DIRECT_CONFESSION_BONUS = 0.04
 NEW_CONTRADICTION_DIRECT_CONFESSION_BONUS = 0.08
 HIGH_IMPACT_SUE_THRESHOLD = 3.0
 HIGH_IMPACT_PRESSURED_MIN_CONFESSION = 0.18
+VALID_CONTRADICTION_TYPES = {
+    "claim_vs_evidence",
+    "claim_vs_truth",
+    "timeline_mismatch",
+    "alibi_mismatch",
+}
 
 DIALOGUE_CONTRADICTION_PRESSURE_BONUS = {
     "detective_highlighted": {
         "none": 0.0,
-        "low": 0.02,
-        "medium": 0.05,
-        "high": 0.07,
-    },
-    "suspect_self_contradicted": {
-        "none": 0.0,
-        "low": 0.05,
-        "medium": 0.08,
-        "high": 0.10,
-    },
-}
-
-DIALOGUE_CONTRADICTION_CONFESSION_BONUS = {
-    "detective_highlighted": {
-        "none": 0.0,
         "low": 0.005,
         "medium": 0.01,
-        "high": 0.02,
+        "high": 0.015,
     },
     "suspect_self_contradicted": {
         "none": 0.0,
         "low": 0.01,
         "medium": 0.02,
         "high": 0.03,
+    },
+}
+
+DIALOGUE_CONTRADICTION_CONFESSION_BONUS = {
+    "detective_highlighted": {
+        "none": 0.0,
+        "low": 0.0,
+        "medium": 0.005,
+        "high": 0.01,
+    },
+    "suspect_self_contradicted": {
+        "none": 0.0,
+        "low": 0.005,
+        "medium": 0.01,
+        "high": 0.02,
     },
 }
 
@@ -425,7 +432,7 @@ class InterrogationCore:
         cooperation: float,
         latest_sue_impact: float = 0.0,
     ) -> str:
-        if p_confession >= 0.8 or (p_confession >= 0.6 and contradictions >= 2):
+        if p_confession >= CONFESSION_TRIGGER_THRESHOLD:
             return "Confession / Breakdown"
         if (
             latest_sue_impact >= HIGH_IMPACT_SUE_THRESHOLD
@@ -875,7 +882,7 @@ def _empty_question_analysis(reason: str = "") -> Dict[str, Any]:
 
 QUESTION_SLOT_HINTS: Dict[str, Tuple[str, ...]] = {
     "crime_time": ("언제", "몇 시", "시각", "시간", "타임", "time", "clock"),
-    "crime_place": ("어디", "장소", "현장", "place", "location", "복도", "편의점", "공장", "거기", "찍혔", "목격"),
+    "crime_place": ("어디", "장소", "현장", "place", "location", "복도", "편의점", "공장"),
     "weapon": ("무기", "흉기", "칼", "weapon"),
     "victim_relation": ("피해자", "관계", "사이", "relation"),
     "alibi_claim": (
@@ -995,6 +1002,21 @@ ACCUSATION_HINTS = (
     "explain",
 )
 
+ALIBI_ATTACK_HINTS = (
+    "있었다는데",
+    "있었다 했는데",
+    "있었다고 했는데",
+    "있다는데",
+    "했다는데",
+    "아까",
+    "진술",
+    "cctv에 찍혔",
+    "cctv에 찍혀",
+    "말이 바뀌",
+    "말이 바뀌었",
+    "없었다며",
+)
+
 def _sanitize_question_analysis(
     case_data: Optional[Dict[str, Any]],
     raw_signal: Dict[str, Any],
@@ -1062,11 +1084,30 @@ def _question_has_contradiction_cues(text: str) -> bool:
         "찍혀있",
         "영상에",
     )
-    return any(pattern in lowered for pattern in CONTRADICTION_HINTS + ACCUSATION_HINTS + extra_cues)
+    return any(
+        pattern in lowered
+        for pattern in CONTRADICTION_HINTS + ACCUSATION_HINTS + ALIBI_ATTACK_HINTS + extra_cues
+    )
+
+def _question_has_alibi_attack_cues(text: str) -> bool:
+    lowered = norm(text).lower()
+    extra_cues = (
+        "에만 있었다",
+        "내내",
+        "계속",
+        "줄곧",
+        "말했잖",
+        "말이 다른데",
+        "거실",
+        "편의점",
+        "집에 있었다",
+    )
+    return any(pattern in lowered for pattern in ALIBI_ATTACK_HINTS + extra_cues)
 
 def _best_contradiction_slot_for_evidence(
     case_data: Optional[Dict[str, Any]],
     evidence_ids: List[str],
+    user_text: str = "",
 ) -> Optional[str]:
     evidence_id_set = {
         str(evidence_id).strip()
@@ -1077,6 +1118,7 @@ def _best_contradiction_slot_for_evidence(
         return None
 
     slot_scores: Dict[str, int] = {}
+    alibi_attack = _question_has_alibi_attack_cues(user_text)
     for contradiction in _case_contradictions(case_data):
         related_evidence = {
             str(evidence_id).strip()
@@ -1093,9 +1135,11 @@ def _best_contradiction_slot_for_evidence(
         score = 1
         contradiction_type = norm(contradiction.get("contradiction_type", "")).lower()
         if contradiction_type == "alibi_mismatch" and slot_name == "alibi_claim":
-            score += 2
+            score += 4 if alibi_attack else 2
         elif contradiction_type in {"claim_vs_evidence", "timeline_mismatch"}:
             score += 1
+        if alibi_attack and slot_name == "alibi_claim":
+            score += 2
         slot_scores[slot_name] = slot_scores.get(slot_name, 0) + score
 
     if not slot_scores:
@@ -1115,6 +1159,7 @@ def _backfill_question_analysis(
     lexical_slot = _detect_slot_from_text(user_text)
     lexical_evidence_ids = _lexical_evidence_hits(case_data, user_text)
     contradiction_cues = _question_has_contradiction_cues(user_text)
+    alibi_attack_cues = _question_has_alibi_attack_cues(user_text)
 
     if lexical_slot and not backfilled.get("target_slot"):
         backfilled["target_slot"] = lexical_slot
@@ -1136,9 +1181,26 @@ def _backfill_question_analysis(
     effective_evidence_ids = uniq_strings(
         list(backfilled.get("mentioned_evidence_ids", []) or []) + lexical_evidence_ids
     )
-    contradiction_slot = _best_contradiction_slot_for_evidence(case_data, effective_evidence_ids)
+    contradiction_slot = _best_contradiction_slot_for_evidence(
+        case_data,
+        effective_evidence_ids,
+        user_text,
+    )
     current_slot = backfilled.get("target_slot")
     if contradiction_slot:
+        evidence_backed_alibi_push = (
+            contradiction_slot == "alibi_claim"
+            and bool(effective_evidence_ids)
+            and (
+                alibi_attack_cues
+                or current_slot in {"alibi_claim", "crime_place"}
+                or backfilled.get("intent") in {"present_evidence", "ask_place", "ask_alibi"}
+            )
+        )
+        contradiction_promotion = (
+            contradiction_cues
+            or evidence_backed_alibi_push
+        )
         override_implies_contradiction = bool(effective_evidence_ids) and current_slot not in {None, "", contradiction_slot}
         should_override = (
             current_slot in {None, "", "crime_place", "crime_time", "last_seen_place"}
@@ -1150,10 +1212,15 @@ def _backfill_question_analysis(
                 contradiction_cues
                 and backfilled.get("intent") in {"present_evidence", "point_contradiction", "ask_place"}
             )
+            or (
+                contradiction_slot == "alibi_claim"
+                and effective_evidence_ids
+                and (alibi_attack_cues or current_slot in {"crime_place", "alibi_claim"})
+            )
         )
         if should_override and current_slot != contradiction_slot:
             backfilled["target_slot"] = contradiction_slot
-            if contradiction_cues or override_implies_contradiction:
+            if contradiction_promotion or override_implies_contradiction:
                 backfilled["intent"] = "point_contradiction"
                 backfilled["pressure_level"] = "high"
             elif backfilled.get("intent") in {"irrelevant", "small_talk"}:
@@ -1163,6 +1230,23 @@ def _backfill_question_analysis(
             reason = norm(backfilled.get("reason", ""))
             suffix = f"evidence contradiction slot override:{contradiction_slot}"
             backfilled["reason"] = f"{reason}; {suffix}" if reason else suffix
+        elif (
+            current_slot == contradiction_slot
+            and effective_evidence_ids
+            and contradiction_promotion
+            and backfilled.get("intent") != "point_contradiction"
+        ):
+            backfilled["intent"] = "point_contradiction"
+            backfilled["pressure_level"] = "high"
+            reason = norm(backfilled.get("reason", ""))
+            suffix = f"evidence contradiction cue promotion:{contradiction_slot}"
+            backfilled["reason"] = f"{reason}; {suffix}" if reason else suffix
+    elif effective_evidence_ids and alibi_attack_cues and backfilled.get("target_slot") == "alibi_claim":
+        backfilled["intent"] = "point_contradiction"
+        backfilled["pressure_level"] = "high"
+        reason = norm(backfilled.get("reason", ""))
+        suffix = "alibi attack cue promotion"
+        backfilled["reason"] = f"{reason}; {suffix}" if reason else suffix
 
     return _sanitize_question_analysis(case_data, backfilled)
 
@@ -1274,16 +1358,11 @@ def llm_evaluate_interrogation(
     except Exception:
         return _fallback_question_analysis(case_data, history, user_text)
 
-def apply_dialogue_contradiction_bonus(
-    pressure_delta: float,
-    confession_probability: float,
+def _dialogue_contradiction_bonus_values(
     dialogue_signal: Optional[Dict[str, Any]],
-    confession_triggered: bool,
-) -> Tuple[float, float]:
-    if confession_triggered:
-        return clamp01(pressure_delta), clamp01(confession_probability)
+) -> Tuple[float, float, bool]:
     if not isinstance(dialogue_signal, dict):
-        return clamp01(pressure_delta), clamp01(confession_probability)
+        return 0.0, 0.0, False
 
     severity = str(dialogue_signal.get("severity", "none")).strip().lower()
     if severity not in {"none", "low", "medium", "high"}:
@@ -1291,8 +1370,10 @@ def apply_dialogue_contradiction_bonus(
 
     pressure_bonus_candidates = [0.0]
     confession_bonus_candidates = [0.0]
+    soft_dialogue_contradiction = False
 
     if dialogue_signal.get("detective_highlighted"):
+        soft_dialogue_contradiction = True
         pressure_bonus_candidates.append(
             DIALOGUE_CONTRADICTION_PRESSURE_BONUS["detective_highlighted"][severity]
         )
@@ -1301,6 +1382,7 @@ def apply_dialogue_contradiction_bonus(
         )
 
     if dialogue_signal.get("suspect_self_contradicted"):
+        soft_dialogue_contradiction = True
         pressure_bonus_candidates.append(
             DIALOGUE_CONTRADICTION_PRESSURE_BONUS["suspect_self_contradicted"][severity]
         )
@@ -1308,13 +1390,11 @@ def apply_dialogue_contradiction_bonus(
             DIALOGUE_CONTRADICTION_CONFESSION_BONUS["suspect_self_contradicted"][severity]
         )
 
-    pressure_bonus = min(0.10, max(pressure_bonus_candidates))
+    pressure_bonus = min(0.03, max(pressure_bonus_candidates))
     confession_bonus = max(confession_bonus_candidates)
-
-    boosted_pressure = clamp01(min(MAX_TURN_PRESSURE_DELTA, pressure_delta + pressure_bonus))
-    boosted_probability = clamp01(confession_probability + confession_bonus)
-
-    return boosted_pressure, boosted_probability
+    if severity == "none":
+        soft_dialogue_contradiction = False
+    return pressure_bonus, confession_bonus, soft_dialogue_contradiction
 
 def _default_suspect_reply_review(
     reason: str = "",
@@ -1717,18 +1797,23 @@ def _contradiction_requires_evidence(
 ) -> bool:
     if not contradiction_type:
         return bool(related_evidence) and not (mentioned_evidence_set & related_evidence)
+    if contradiction_type in {"claim_vs_evidence", "alibi_mismatch", "timeline_mismatch"}:
+        if not related_evidence or not (mentioned_evidence_set & related_evidence):
+            return True
     if contradiction_type == "claim_vs_truth":
-        return False
-    if contradiction_type == "claim_vs_evidence":
-        return not related_evidence or not (mentioned_evidence_set & related_evidence)
+        if related_evidence:
+            return not (mentioned_evidence_set & related_evidence)
+        return target_slot not in {"crime_time", "crime_place"}
     if contradiction_type == "timeline_mismatch":
         if target_slot not in {"crime_time", "crime_place", "last_seen_place"}:
             return True
-        return not related_evidence or not (mentioned_evidence_set & related_evidence)
+        return False
     if contradiction_type == "alibi_mismatch":
         if target_slot != "alibi_claim":
             return True
-        return not related_evidence or not (mentioned_evidence_set & related_evidence)
+        return False
+    if contradiction_type == "claim_vs_evidence":
+        return False
     return False
 
 def detect_contradictions_from_slot(
@@ -1753,11 +1838,11 @@ def detect_contradictions_from_slot(
     }
     allowed_slots = {target_slot}
     if target_slot == "alibi_claim":
-        allowed_slots |= {"crime_place", "crime_time", "last_seen_place", "met_victim_that_day"}
+        allowed_slots |= {"crime_place", "crime_time", "last_seen_place"}
     elif target_slot == "last_seen_place":
         allowed_slots |= {"crime_place"}
 
-    contradiction_ids: List[str] = []
+    contradiction_candidates: List[Tuple[int, str]] = []
     for contradiction in _case_contradictions(case_data):
         contradiction_id = norm(contradiction.get("id", ""))
         contradiction_slot = norm(contradiction.get("slot", ""))
@@ -1789,11 +1874,24 @@ def detect_contradictions_from_slot(
         ):
             continue
 
-        contradiction_ids.append(contradiction_id)
+        score = 0
+        if contradiction_slot == target_slot:
+            score += 4
+        elif contradiction_slot in allowed_slots:
+            score += 1
+        if mentioned_evidence_set & related_evidence:
+            score += 2
+        if contradiction_type == "alibi_mismatch" and target_slot == "alibi_claim":
+            score += 2
+        elif contradiction_type == "timeline_mismatch" and target_slot in {"crime_time", "crime_place", "last_seen_place"}:
+            score += 1
+        contradiction_candidates.append((score, contradiction_id))
 
-    if slot_truth_matches and not contradiction_ids:
+    if slot_truth_matches and not contradiction_candidates:
         return []
-    return uniq_strings(contradiction_ids)
+    contradiction_candidates.sort(key=lambda item: (-item[0], item[1]))
+    contradiction_ids = uniq_strings([contradiction_id for _score, contradiction_id in contradiction_candidates])
+    return contradiction_ids[:1]
 
 def analyze_interrogation_turn_rule_based(
     case_data: Optional[Dict[str, Any]],
@@ -1822,6 +1920,7 @@ def analyze_interrogation_turn_rule_based(
                 case_data,
                 mentioned_evidence_ids,
             )
+    hard_contradiction_ids = uniq_strings(contradiction_ids)
     return {
         "question_analysis": analysis,
         "target_slot": target_slot,
@@ -1829,7 +1928,9 @@ def analyze_interrogation_turn_rule_based(
         "claimed_value_confidence": round(claimed_value_confidence, 3),
         "truth_value": truth_slots.get(target_slot or "", ""),
         "mentioned_evidence_ids": mentioned_evidence_ids,
-        "detected_contradiction_ids": contradiction_ids,
+        "hard_contradiction_ids": hard_contradiction_ids,
+        "detected_contradiction_ids": hard_contradiction_ids,
+        "soft_dialogue_contradiction": False,
     }
 
 def build_case_context(
@@ -1878,6 +1979,7 @@ def evaluate_interrogation_progress_v3(
     interrogation_signal: Optional[Dict[str, Any]] = None,
     prior_progress: Optional[Dict[str, Any]] = None,
     contradiction_ids: Optional[List[str]] = None,
+    dialogue_contradiction_signal: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     if not case_data:
         return {
@@ -1885,6 +1987,9 @@ def evaluate_interrogation_progress_v3(
             "confession_probability": 0.0,
             "cumulative_evidence_ids": [],
             "cumulative_contradiction_ids": [],
+            "hard_contradiction_ids": [],
+            "soft_dialogue_contradiction": False,
+            "soft_dialogue_severity": "none",
             "stress_score": 0.0,
             "cooperation_score": DEFAULT_COOPERATION_SCORE,
             "defense_intelligence": 0.65,
@@ -1892,6 +1997,12 @@ def evaluate_interrogation_progress_v3(
             "raw_odds": 0.0,
             "player_intent": "Neutral",
             "fsm_state": DEFAULT_FSM_STATE,
+            "pressure_components": {
+                "evidence": 0.0,
+                "hard_contradiction": 0.0,
+                "soft_dialogue": 0.0,
+                "pressure_level": 0.0,
+            },
         }
 
     signal = interrogation_signal or llm_evaluate_interrogation(case_data, history, user_text)
@@ -1936,20 +2047,48 @@ def evaluate_interrogation_progress_v3(
     if pressure_level not in PRESSURE_LEVEL_BONUS:
         pressure_level = "none"
 
-    pressure_delta = (
+    dialogue_pressure_bonus, dialogue_confession_bonus, soft_dialogue_contradiction = (
+        _dialogue_contradiction_bonus_values(dialogue_contradiction_signal)
+    )
+    evidence_pressure = (
         NEW_EVIDENCE_PRESSURE_DELTA * len(new_evidence_ids)
         + REPEATED_EVIDENCE_PRESSURE_DELTA * len(repeated_evidence_ids)
-        + NEW_CONTRADICTION_PRESSURE_DELTA * len(new_contradiction_ids)
+    )
+    hard_contradiction_pressure = (
+        NEW_CONTRADICTION_PRESSURE_DELTA * len(new_contradiction_ids)
         + REPEATED_CONTRADICTION_PRESSURE_DELTA * len(repeated_contradiction_ids)
-        + PRESSURE_LEVEL_BONUS.get(pressure_level, 0.0)
+    )
+    pressure_level_bonus = PRESSURE_LEVEL_BONUS.get(pressure_level, 0.0)
+    pressure_components = {
+        "evidence": evidence_pressure,
+        "hard_contradiction": hard_contradiction_pressure,
+        "soft_dialogue": dialogue_pressure_bonus,
+        "pressure_level": pressure_level_bonus,
+    }
+    pressure_delta = (
+        pressure_components["evidence"]
+        + pressure_components["hard_contradiction"]
+        + pressure_components["soft_dialogue"]
+        + pressure_components["pressure_level"]
     )
 
     if not user_text or is_too_ambiguous(user_text):
+        pressure_components = {key: 0.0 for key in pressure_components}
         pressure_delta = 0.0
     elif detect_repeat(history, user_text):
+        pressure_components = {
+            key: value * 0.35 for key, value in pressure_components.items()
+        }
         pressure_delta *= 0.35
 
-    pressure_delta = clamp01(min(MAX_TURN_PRESSURE_DELTA, pressure_delta))
+    if pressure_delta > MAX_TURN_PRESSURE_DELTA and pressure_delta > 0:
+        cap_scale = MAX_TURN_PRESSURE_DELTA / pressure_delta
+        pressure_components = {
+            key: value * cap_scale for key, value in pressure_components.items()
+        }
+        pressure_delta = MAX_TURN_PRESSURE_DELTA
+
+    pressure_delta = clamp01(pressure_delta)
     stress_score = _update_stress_score(
         prior_stress_score,
         pressure_delta,
@@ -1991,6 +2130,7 @@ def evaluate_interrogation_progress_v3(
         direct_bonus += NEW_EVIDENCE_DIRECT_CONFESSION_BONUS
     if new_contradiction_ids:
         direct_bonus += NEW_CONTRADICTION_DIRECT_CONFESSION_BONUS
+    direct_bonus += dialogue_confession_bonus
     confession_probability = _cap_turn_confession_probability(
         prior_confession_probability,
         confession_probability + direct_bonus,
@@ -2016,6 +2156,11 @@ def evaluate_interrogation_progress_v3(
         "confession_probability": confession_probability,
         "cumulative_evidence_ids": sorted(cumulative_evidence_ids),
         "cumulative_contradiction_ids": sorted(cumulative_contradiction_ids),
+        "hard_contradiction_ids": sorted(current_contradiction_ids),
+        "soft_dialogue_contradiction": soft_dialogue_contradiction,
+        "soft_dialogue_severity": str(
+            (dialogue_contradiction_signal or {}).get("severity", "none")
+        ).strip().lower() if isinstance(dialogue_contradiction_signal, dict) else "none",
         "stress_score": stress_score,
         "cooperation_score": cooperation_score,
         "defense_intelligence": defense_intelligence,
@@ -2023,6 +2168,12 @@ def evaluate_interrogation_progress_v3(
         "raw_odds": raw_odds,
         "player_intent": player_intent,
         "fsm_state": fsm_state,
+        "pressure_components": {
+            "evidence": round(pressure_components["evidence"], 4),
+            "hard_contradiction": round(pressure_components["hard_contradiction"], 4),
+            "soft_dialogue": round(pressure_components["soft_dialogue"], 4),
+            "pressure_level": round(pressure_components["pressure_level"], 4),
+        },
     }
 
 # =========================================================
@@ -2047,8 +2198,15 @@ def stt_transcribe(audio_bytes: bytes) -> str:
     try:
         return _call(STT_PRIMARY)
     except BadRequestError as e:
-        msg = str(e)
-        if "unsupported_format" in msg or "messages" in msg:
+        msg = str(e).lower()
+        if (
+            "unsupported" in msg
+            or "corrupted" in msg
+            or "invalid_value" in msg
+            or "audio file might be corrupted" in msg
+            or "unsupported_format" in msg
+            or "messages" in msg
+        ):
             return _call(STT_FALLBACK)
         raise
 
@@ -2158,7 +2316,10 @@ CASE_JSON_SCHEMA = {
                         "enum": TRUTH_SLOT_NAMES,
                     },
                     "truth_value": {"type": "string"},
-                    "contradiction_type": {"type": "string"},
+                    "contradiction_type": {
+                        "type": "string",
+                        "enum": sorted(VALID_CONTRADICTION_TYPES),
+                    },
                 },
                 "required": [
                     "id",
@@ -2227,6 +2388,9 @@ def coerce_case_payload(case_blob: Any, fallback_case_id: str = "") -> Optional[
         truth_value = norm(contradiction.get("truth_value", ""))
         if slot_name == "met_victim_that_day":
             truth_value = _normalize_slot_value_for_slot(truth_value, slot_name)
+        contradiction_type = norm(contradiction.get("contradiction_type", ""))
+        if contradiction_type not in VALID_CONTRADICTION_TYPES:
+            contradiction_type = "claim_vs_truth"
         normalized_contradictions.append(
             {
                 "id": norm(contradiction.get("id", "")),
@@ -2234,7 +2398,7 @@ def coerce_case_payload(case_blob: Any, fallback_case_id: str = "") -> Optional[
                 "related_evidence": uniq_strings([str(item).strip() for item in related_evidence]),
                 "slot": slot_name,
                 "truth_value": truth_value,
-                "contradiction_type": norm(contradiction.get("contradiction_type", "")),
+                "contradiction_type": contradiction_type,
             }
         )
 
@@ -2379,7 +2543,6 @@ def llm_generate_case() -> Dict[str, Any]:
             },
             max_output_tokens=4000,
             store=False,
-            temperature=1.0,
         )
 
         text = (resp.output_text or "").strip()
@@ -2697,6 +2860,9 @@ def llm_suspect_answer(
         retry_user = user + "\n\n[Correction] " + " ".join(warnings)
         out = _generate_suspect_reply(retry_user, 200)
 
+    if _contains_banned_evidence(out, all_evidence_words, allowed_evidence_words):
+        out = "그 부분은 제가 지금 드릴 말씀이 없습니다."
+
     if not hist_lines:
         replacements = {
             "아까 말씀드렸듯이": "",
@@ -2868,7 +3034,7 @@ def llm_review_suspect_reply(user_text: str, suspect_text: str) -> Dict[str, Any
         "reason": "; ".join(reason_parts),
     }
 
-def llm_evaluate_dialogue_contradiction(
+def detect_dialogue_contradiction_local(
     history: List[Dict[str, Any]],
     user_text: str,
     suspect_text: str,
@@ -3154,7 +3320,11 @@ async def interrogation_qna(
         if file is not None:
             audio_bytes = await file.read()
             if audio_bytes:
-                final_user_text = stt_transcribe(audio_bytes)
+                try:
+                    final_user_text = stt_transcribe(audio_bytes)
+                except Exception as stt_error:
+                    print(f"[STT] Failed transcription: {stt_error}")
+                    final_user_text = final_user_text or ""
         final_user_text = norm(final_user_text)
         debug_enabled = is_truthy_string(debug) or is_truthy_string(os.getenv("INTERROGATION_DEBUG_RESPONSES", ""))
 
@@ -3211,7 +3381,9 @@ async def interrogation_qna(
         prior_progress = _get_progress_state(case_id)
         prior_confession_probability = float(prior_progress["confession_probability"])
         prior_turn_count = max(0, int(prior_progress.get("turn_count", 0) or 0))
-        prior_confession_triggered = prior_confession_probability >= 0.85
+        prior_confession_triggered = (
+            prior_confession_probability >= CONFESSION_TRIGGER_THRESHOLD
+        )
 
         if prior_confession_triggered:
             msg = "이미 피의자가 자백했습니다. 이번 심문은 종료됐습니다."
@@ -3261,6 +3433,10 @@ async def interrogation_qna(
                     "pressure_delta": 0.0,
                     "confession_probability": prior_confession_probability,
                     "confession_triggered": bool(prior_confession_triggered),
+                    "fsm_state": norm(prior_progress.get("fsm_state", DEFAULT_FSM_STATE)) or DEFAULT_FSM_STATE,
+                    "stress_score": float(prior_progress.get("stress_score", 0.0)),
+                    "raw_odds": float(prior_progress.get("last_raw_odds", 0.0)),
+                    "latest_sue_impact": float(prior_progress.get("last_sue_impact", 0.0)),
                     "turn_count": prior_turn_count,
                     "audio_wav_b64": await tts_to_b64(msg),
                 },
@@ -3276,6 +3452,10 @@ async def interrogation_qna(
                     "pressure_delta": 0.0,
                     "confession_probability": prior_confession_probability,
                     "confession_triggered": bool(prior_confession_triggered),
+                    "fsm_state": norm(prior_progress.get("fsm_state", DEFAULT_FSM_STATE)) or DEFAULT_FSM_STATE,
+                    "stress_score": float(prior_progress.get("stress_score", 0.0)),
+                    "raw_odds": float(prior_progress.get("last_raw_odds", 0.0)),
+                    "latest_sue_impact": float(prior_progress.get("last_sue_impact", 0.0)),
                     "turn_count": prior_turn_count,
                     "audio_wav_b64": await tts_to_b64(msg),
                 },
@@ -3284,7 +3464,9 @@ async def interrogation_qna(
         # 2) case load (cache 우선)
         # 3) calc pressure/prob
         question_analysis = llm_evaluate_interrogation(case_data, history, final_user_text)
-        confession_triggered = prior_confession_probability >= 0.85
+        confession_triggered = (
+            prior_confession_probability >= CONFESSION_TRIGGER_THRESHOLD
+        )
         current_behavior_state = norm(prior_progress.get("fsm_state", DEFAULT_FSM_STATE)) or DEFAULT_FSM_STATE
 
         # 4) LLM answer
@@ -3309,13 +3491,26 @@ async def interrogation_qna(
             suspect_text,
             question_analysis,
         )
+        dialogue_contradiction_signal = _empty_dialogue_contradiction_signal("not evaluated")
+        if not confession_triggered:
+            dialogue_contradiction_signal = detect_dialogue_contradiction_local(
+                history,
+                final_user_text,
+                suspect_text,
+            )
+        rule_based_turn["soft_dialogue_contradiction"] = bool(
+            dialogue_contradiction_signal.get("detective_highlighted")
+            or dialogue_contradiction_signal.get("suspect_self_contradicted")
+        ) and str(dialogue_contradiction_signal.get("severity", "none")).strip().lower() != "none"
+        rule_based_turn["soft_dialogue_contradiction_signal"] = dialogue_contradiction_signal
         progress_eval = evaluate_interrogation_progress_v3(
             case_data,
             history,
             final_user_text,
             question_analysis,
             prior_progress,
-            rule_based_turn["detected_contradiction_ids"],
+            rule_based_turn["hard_contradiction_ids"],
+            dialogue_contradiction_signal,
         )
         if confession_triggered:
             progress_eval["confession_probability"] = max(
@@ -3328,42 +3523,7 @@ async def interrogation_qna(
         cumulative_evidence_ids = list(progress_eval["cumulative_evidence_ids"])
         cumulative_contradiction_ids = list(progress_eval["cumulative_contradiction_ids"])
         if not confession_triggered:
-            dialogue_contradiction_signal = llm_evaluate_dialogue_contradiction(
-                history,
-                final_user_text,
-                suspect_text,
-            )
-            base_pressure_delta = pressure_delta
-            pressure_delta, confession_probability = apply_dialogue_contradiction_bonus(
-                pressure_delta,
-                confession_probability,
-                dialogue_contradiction_signal,
-                confession_triggered,
-            )
-            stress_bonus = max(0.0, pressure_delta - base_pressure_delta)
-            progress_eval["pressure_delta"] = float(pressure_delta)
-            progress_eval["stress_score"] = clamp01(progress_eval["stress_score"] + stress_bonus)
-            core = _build_interrogation_core(case_data)
-            raw_odds, model_probability = core.calculate_confession_probability(
-                progress_eval["stress_score"],
-                progress_eval["defense_intelligence"],
-                len(progress_eval["cumulative_contradiction_ids"]),
-                progress_eval["latest_sue_impact"],
-            )
-            progress_eval["raw_odds"] = raw_odds
-            progress_eval["confession_probability"] = _cap_turn_confession_probability(
-                prior_confession_probability,
-                max(float(confession_probability), model_probability),
-            )
-            progress_eval["fsm_state"] = core.evaluate_fsm_state(
-                progress_eval["confession_probability"],
-                len(progress_eval["cumulative_contradiction_ids"]),
-                progress_eval["player_intent"],
-                progress_eval["cooperation_score"],
-                progress_eval["latest_sue_impact"],
-            )
-            confession_probability = float(progress_eval["confession_probability"])
-            if confession_probability >= 0.85:
+            if confession_probability >= CONFESSION_TRIGGER_THRESHOLD:
                 confession_triggered = True
                 progress_eval["fsm_state"] = "Confession / Breakdown"
                 progress_eval["confession_probability"] = confession_probability
@@ -3410,6 +3570,10 @@ async def interrogation_qna(
                 "scoring_model": {
                     "player_intent": progress_eval["player_intent"],
                     "pressure_delta": float(progress_eval["pressure_delta"]),
+                    "pressure_components": progress_eval.get("pressure_components", {}),
+                    "hard_contradiction_ids": progress_eval.get("hard_contradiction_ids", []),
+                    "soft_dialogue_contradiction": bool(progress_eval.get("soft_dialogue_contradiction", False)),
+                    "soft_dialogue_severity": progress_eval.get("soft_dialogue_severity", "none"),
                     "stress_score": float(progress_eval["stress_score"]),
                     "cooperation_score": float(progress_eval["cooperation_score"]),
                     "defense_intelligence": float(progress_eval["defense_intelligence"]),
