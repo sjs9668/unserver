@@ -319,7 +319,7 @@ REPEATED_EVIDENCE_PRESSURE_DELTA = 0.02
 NEW_CONTRADICTION_PRESSURE_DELTA = 0.12
 REPEATED_CONTRADICTION_PRESSURE_DELTA = 0.04
 MAX_TURN_PRESSURE_DELTA = 0.22
-MAX_MODEL_CONFESSION_GAIN_PER_TURN = 0.18
+MAX_MODEL_CONFESSION_GAIN_PER_TURN = 0.22
 MAX_GAME_TURNS = 10
 STRESS_IDLE_DECAY = 0.01
 STRESS_WEAK_TURN_DECAY = 0.003
@@ -327,6 +327,8 @@ STRESS_REPEAT_DECAY = 0.01
 CORE_QUESTION_CONFESSION_BONUS = 0.03
 NEW_EVIDENCE_DIRECT_CONFESSION_BONUS = 0.04
 NEW_CONTRADICTION_DIRECT_CONFESSION_BONUS = 0.08
+HIGH_IMPACT_SUE_THRESHOLD = 3.0
+HIGH_IMPACT_PRESSURED_MIN_CONFESSION = 0.18
 
 DIALOGUE_CONTRADICTION_PRESSURE_BONUS = {
     "detective_highlighted": {
@@ -421,11 +423,18 @@ class InterrogationCore:
         contradictions: int,
         player_intent: str,
         cooperation: float,
+        latest_sue_impact: float = 0.0,
     ) -> str:
-        if player_intent == "Intimidate" and cooperation < 0.2:
-            return "Angry / Uncooperative"
         if p_confession >= 0.8 or (p_confession >= 0.6 and contradictions >= 2):
             return "Confession / Breakdown"
+        if (
+            latest_sue_impact >= HIGH_IMPACT_SUE_THRESHOLD
+            and contradictions >= 1
+            and p_confession >= HIGH_IMPACT_PRESSURED_MIN_CONFESSION
+        ):
+            return "Pressured / Shaken"
+        if player_intent == "Intimidate" and cooperation < 0.2:
+            return "Angry / Uncooperative"
         if 0.4 <= p_confession < 0.8:
             return "Pressured / Shaken"
         return "Idle / Evasion"
@@ -1846,6 +1855,7 @@ def evaluate_interrogation_progress_v3(
         len(cumulative_contradiction_ids),
         player_intent,
         cooperation_score,
+        latest_sue_impact,
     )
 
     return {
@@ -3197,6 +3207,7 @@ async def interrogation_qna(
                 len(progress_eval["cumulative_contradiction_ids"]),
                 progress_eval["player_intent"],
                 progress_eval["cooperation_score"],
+                progress_eval["latest_sue_impact"],
             )
             confession_probability = float(progress_eval["confession_probability"])
             if confession_probability >= 0.85:
