@@ -442,7 +442,7 @@ class InterrogationCore:
             return "Pressured / Shaken"
         if player_intent == "Intimidate" and cooperation < 0.2:
             return "Angry / Uncooperative"
-        if 0.4 <= p_confession < 0.8:
+        if 0.4 <= p_confession < CONFESSION_TRIGGER_THRESHOLD:
             return "Pressured / Shaken"
         return "Idle / Evasion"
 
@@ -829,9 +829,15 @@ def _evidence_lexical_candidates(evidence: Dict[str, Any]) -> List[str]:
     evidence_id = str(evidence.get("id", "")).strip()
     name = str(evidence.get("name", "")).strip()
     description = str(evidence.get("description", "")).strip()
+    aliases = evidence.get("aliases", [])
+    if not isinstance(aliases, list):
+        aliases = []
 
     candidates = [evidence_id, name, description]
-    lowered = norm(f"{name} {description}").lower()
+    candidates.extend(str(alias).strip() for alias in aliases if str(alias).strip())
+    lowered = norm(
+        " ".join([name, description] + [str(alias).strip() for alias in aliases if str(alias).strip()])
+    ).lower()
     for trigger_patterns, hint_terms in EVIDENCE_LEXICAL_HINTS:
         if any(pattern in lowered for pattern in trigger_patterns):
             candidates.extend(hint_terms)
@@ -1309,6 +1315,7 @@ def llm_evaluate_interrogation(
                 "id": e.get("id", ""),
                 "name": e.get("name", ""),
                 "description": e.get("description", ""),
+                "aliases": e.get("aliases", []),
             }
             for e in _case_evidences(case_data)
         ],
@@ -2293,6 +2300,10 @@ CASE_JSON_SCHEMA = {
                     "id": {"type": "string"},
                     "name": {"type": "string"},
                     "description": {"type": "string"},
+                    "aliases": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
                 },
                 "required": ["id", "name", "description"],
             },
@@ -2363,15 +2374,19 @@ def coerce_case_payload(case_blob: Any, fallback_case_id: str = "") -> Optional[
         except Exception:
             return default
 
-    normalized_evidences: List[Dict[str, str]] = []
+    normalized_evidences: List[Dict[str, Any]] = []
     for evidence in evidences:
         if not isinstance(evidence, dict):
             continue
+        aliases = evidence.get("aliases", [])
+        if not isinstance(aliases, list):
+            aliases = []
         normalized_evidences.append(
             {
                 "id": norm(evidence.get("id", "")),
                 "name": norm(evidence.get("name", "")),
                 "description": norm(evidence.get("description", "")),
+                "aliases": uniq_strings([norm(alias) for alias in aliases if norm(alias)]),
             }
         )
 
@@ -2390,7 +2405,7 @@ def coerce_case_payload(case_blob: Any, fallback_case_id: str = "") -> Optional[
             truth_value = _normalize_slot_value_for_slot(truth_value, slot_name)
         contradiction_type = norm(contradiction.get("contradiction_type", ""))
         if contradiction_type not in VALID_CONTRADICTION_TYPES:
-            contradiction_type = "claim_vs_truth"
+            contradiction_type = "claim_vs_evidence"
         normalized_contradictions.append(
             {
                 "id": norm(contradiction.get("id", "")),
@@ -2489,6 +2504,7 @@ def llm_generate_case() -> Dict[str, Any]:
         "Each contradiction.slot should match the main truth slot being challenged.\n"
         "Each contradiction.truth_value should be the actual value the server can compare against.\n"
         "Use contradiction_type values such as claim_vs_evidence, claim_vs_truth, timeline_mismatch, or alibi_mismatch.\n"
+        "Each evidence item may include a short aliases array with 1 to 4 natural user-facing reference phrases such as CCTV aliases, camera aliases, or place-specific evidence nicknames.\n"
         "Include at least one contradiction tied to the suspect's alibi or claimed whereabouts.\n"
         "false_statement should sound plausible at first but collapse under evidence or contradiction pressure.\n"
         "crime_flow is the hidden ground truth summary.\n"
@@ -2610,6 +2626,11 @@ def _all_evidence_words(case_data: Optional[Dict[str, Any]]) -> List[str]:
                 words.append(str(e["id"]))
             if e.get("name"):
                 words.append(str(e["name"]))
+            aliases = e.get("aliases", [])
+            if isinstance(aliases, list):
+                for alias in aliases:
+                    if alias:
+                        words.append(str(alias))
     out = []
     seen = set()
     for w in words:
@@ -3565,6 +3586,10 @@ async def interrogation_qna(
         }
         if debug_enabled:
             response_content["debug"] = {
+                "signal_guide": {
+                    "hard": "Case-data contradiction confirmed by server rules and evidence linkage.",
+                    "soft": "Dialogue-flow wobble detected from suspect statement changes.",
+                },
                 "question_analysis": question_analysis,
                 "rule_based_turn": rule_based_turn,
                 "scoring_model": {
