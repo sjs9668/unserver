@@ -6,12 +6,12 @@ import re
 import hashlib
 import random
 import math
+import copy
 from io import BytesIO
 from typing import Any, Dict, List, Optional, Tuple
 
 from pathlib import Path
 import uuid
-from collections import deque
 
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.responses import JSONResponse
@@ -63,81 +63,16 @@ CASE_CACHE: Dict[str, Dict[str, Any]] = {}
 INTERROGATION_PROGRESS_CACHE: Dict[str, Dict[str, Any]] = {}
 RUNTIME_STORE_DIR = Path(__file__).parent / "runtime_store"
 CASE_STORE_DIR = RUNTIME_STORE_DIR / "cases"
+PREBUILT_CASE_DIR = Path(__file__).parent / "cases" / "prebuilt"
 
-for _store_dir in (CASE_STORE_DIR,):
+for _store_dir in (CASE_STORE_DIR, PREBUILT_CASE_DIR):
     _store_dir.mkdir(parents=True, exist_ok=True)
 
-# =========================================================
-# EXAMPLE CASE (템플릿 예시로만 사용)
-# =========================================================
-EXAMPLE_CASE_PATH = Path(__file__).parent / "cases" / "case_interrogation_01.json"
-EXAMPLE_CASE_TEXT = ""
-
-if EXAMPLE_CASE_PATH.exists():
-    EXAMPLE_CASE_TEXT = EXAMPLE_CASE_PATH.read_text(encoding="utf-8").strip()
-else:
-    EXAMPLE_CASE_TEXT = ""
-
-CASE_VARIANT_BLUEPRINTS: List[Dict[str, Any]] = [
-    {
-        "label": "절도 폭행",
-        "type_hint": "절도 후 폭행",
-        "place_hint": "원룸 건물 복도, 오피스텔 주차장, 편의점 창고",
-        "motive_hint": "생활고, 빚, 들킬까 봐 충동적으로 폭행",
-        "allow_fire": False,
-    },
-    {
-        "label": "횡령 은폐",
-        "type_hint": "횡령 및 증거 은닉",
-        "place_hint": "중소기업 사무실, 회계팀, 창고 사무동",
-        "motive_hint": "투자 실패, 도박 빚, 장부 조작 은폐",
-        "allow_fire": False,
-    },
-    {
-        "label": "뺑소니 은폐",
-        "type_hint": "뺑소니 및 은폐",
-        "place_hint": "골목길, 공장 진입로, 새벽 도로",
-        "motive_hint": "음주 사실 은폐, 면허 문제, 두려움",
-        "allow_fire": False,
-    },
-    {
-        "label": "협박 갈취",
-        "type_hint": "협박 및 갈취",
-        "place_hint": "노래방, 학원 사무실, 골목 흡연 구역",
-        "motive_hint": "돈 요구, 약점 이용, 지위 관계 악용",
-        "allow_fire": False,
-    },
-    {
-        "label": "밀수 운반",
-        "type_hint": "밀수 및 불법 운반",
-        "place_hint": "항구 창고, 냉동 탑차, 물류센터 하역장",
-        "motive_hint": "고수익 제안, 빚 상환, 조직 압박",
-        "allow_fire": False,
-    },
-    {
-        "label": "스토킹 침입",
-        "type_hint": "스토킹 및 주거침입",
-        "place_hint": "빌라 복도, 피해자 집 앞, 지하주차장",
-        "motive_hint": "집착, 거절에 대한 분노, 관계 망상",
-        "allow_fire": False,
-    },
-    {
-        "label": "살인",
-        "type_hint": "살인",
-        "place_hint": "아파트 내부, 외딴 골목, 공장 사무실, 창고",
-        "motive_hint": "원한, 금전 분쟁, 관계 파탄, 충동적 격분",
-        "allow_fire": False,
-    },
-    {
-        "label": "방화",
-        "type_hint": "방화",
-        "place_hint": "상가 창고, 폐건물, 외곽 창고",
-        "motive_hint": "보험금, 보복, 증거 인멸",
-        "allow_fire": True,
-    },
-]
-RECENT_CASE_TYPE_HISTORY: deque[str] = deque(maxlen=5)
-FIRE_CASE_MARKERS = ("방화", "화재", "불")
+# Final server shape:
+# - cases come from prebuilt JSON files
+# - the interrogation engine is still the existing server-side flow
+#   (question analysis -> suspect answer -> contradiction detection -> scoring)
+# - documents / personality / PAD are extra case metadata for briefing and UI linkage
 
 # =========================================================
 # UTILS
@@ -213,7 +148,7 @@ def normalize_progress_state(blob: Any) -> Dict[str, Any]:
         turn_count = 0
 
     return {
-        "confession_probability": clamp01(blob.get("confession_probability", 0.0)),
+        "breakdown_probability": clamp01(blob.get("breakdown_probability", 0.0)),
         "referenced_evidence_ids": sorted(
             {str(eid).strip() for eid in (blob.get("referenced_evidence_ids", []) or []) if str(eid).strip()}
         ),
@@ -226,9 +161,24 @@ def normalize_progress_state(blob: Any) -> Dict[str, Any]:
         ),
         "stress_score": clamp01(blob.get("stress_score", 0.0)),
         "cooperation_score": clamp01(blob.get("cooperation_score", DEFAULT_COOPERATION_SCORE)),
+        "cumulative_pressure": clamp01(blob.get("cumulative_pressure", 0.0)),
         "fsm_state": norm(blob.get("fsm_state", DEFAULT_FSM_STATE)) or DEFAULT_FSM_STATE,
         "last_raw_odds": safe_float(blob.get("last_raw_odds", 0.0), 0.0),
         "last_sue_impact": safe_float(blob.get("last_sue_impact", 0.0), 0.0),
+        "statement_collapse_stage": max(0, min(5, int(safe_float(blob.get("statement_collapse_stage", 0), 0.0)))),
+        "core_fact_exposed": bool(
+            blob.get("core_fact_exposed", False)
+            or max(0, min(5, int(safe_float(blob.get("statement_collapse_stage", 0), 0.0)))) >= 5
+            or clamp01(blob.get("breakdown_probability", 0.0)) >= BREAKDOWN_EXPOSURE_THRESHOLD
+        ),
+        "pad_state": _normalize_pad_state_blob(blob.get("pad_state", {})),
+        "final_psychological_reaction": norm(blob.get("final_psychological_reaction", "")),
+        "selected_personality": _normalize_selected_personality_blob(
+            blob.get("selected_personality", {})
+        ),
+        "statement_records": _normalize_statement_records(blob.get("statement_records", [])),
+        "submitted_judgment": _normalize_submitted_judgment(blob.get("submitted_judgment", {})),
+        "final_psychological_report": _normalize_final_report_blob(blob.get("final_psychological_report", {})),
         "turn_count": max(0, turn_count),
     }
 
@@ -284,23 +234,30 @@ REPEATED_EVIDENCE_PRESSURE_DELTA = 0.02
 NEW_CONTRADICTION_PRESSURE_DELTA = 0.12
 REPEATED_CONTRADICTION_PRESSURE_DELTA = 0.04
 MAX_TURN_PRESSURE_DELTA = 0.22
-MAX_MODEL_CONFESSION_GAIN_PER_TURN = 0.22
 MAX_GAME_TURNS = 10
-CONFESSION_TRIGGER_THRESHOLD = 0.85
+BREAKDOWN_EXPOSURE_THRESHOLD = 0.85
 STRESS_IDLE_DECAY = 0.01
 STRESS_WEAK_TURN_DECAY = 0.003
 STRESS_REPEAT_DECAY = 0.01
-CORE_QUESTION_CONFESSION_BONUS = 0.03
-NEW_EVIDENCE_DIRECT_CONFESSION_BONUS = 0.04
-NEW_CONTRADICTION_DIRECT_CONFESSION_BONUS = 0.08
 HIGH_IMPACT_SUE_THRESHOLD = 3.0
-HIGH_IMPACT_PRESSURED_MIN_CONFESSION = 0.18
+HIGH_IMPACT_PRESSURED_MIN_BREAKDOWN = 0.18
+PRESSURE_SIGMOID_STEEPNESS = 9.5
+PRESSURE_SIGMOID_MIDPOINT = 0.58
+CORE_QUESTION_PRESSURE_BONUS = 0.03
+NEW_EVIDENCE_PRESSURE_PROGRESS_BONUS = 0.04
+NEW_CONTRADICTION_PRESSURE_PROGRESS_BONUS = 0.08
+SOFT_DIALOGUE_PRESSURE_PROGRESS_BONUS = 0.02
+SUE_PRESSURE_BONUS_SCALE = 0.02
+MAX_TURN_CUMULATIVE_PRESSURE_GAIN = 0.30
 VALID_CONTRADICTION_TYPES = {
     "claim_vs_evidence",
     "claim_vs_truth",
     "timeline_mismatch",
     "alibi_mismatch",
 }
+
+LEGACY_CONFESSION_COMPAT_THRESHOLD = BREAKDOWN_EXPOSURE_THRESHOLD
+EXPOSURE_FSM_STATE = "Breakdown / Core Fact Exposure"
 
 DIALOGUE_CONTRADICTION_PRESSURE_BONUS = {
     "detective_highlighted": {
@@ -335,17 +292,11 @@ DIALOGUE_CONTRADICTION_CONFESSION_BONUS = {
 class InterrogationCore:
     def __init__(
         self,
-        steepness: float = 1.15,
-        offset: float = -3.4,
-        alpha: float = 2.1,
-        beta: float = 1.1,
-        gamma: float = 0.9,
+        pressure_steepness: float = PRESSURE_SIGMOID_STEEPNESS,
+        pressure_midpoint: float = PRESSURE_SIGMOID_MIDPOINT,
     ):
-        self.w = steepness
-        self.b = offset
-        self.alpha = alpha
-        self.beta = beta
-        self.gamma = gamma
+        self.w = pressure_steepness
+        self.midpoint = pressure_midpoint
         self.sue_matrix = {
             "low_spec_low_src": 0.5,
             "low_spec_high_src": 1.2,
@@ -359,55 +310,37 @@ class InterrogationCore:
 
     def calculate_raw_odds(
         self,
-        current_stress: float,
-        defense_intelligence: float,
-        latest_sue_impact: float,
-        caught_contradictions: int,
+        cumulative_pressure: float,
     ) -> float:
-        impact_multiplier = latest_sue_impact if caught_contradictions > 0 else 0.0
-        return (
-            (self.alpha * current_stress)
-            - (self.beta * defense_intelligence)
-            + (self.gamma * impact_multiplier)
-        )
+        return self.w * (clamp01(cumulative_pressure) - self.midpoint)
 
-    def calculate_confession_probability(
+    def calculate_breakdown_probability(
         self,
-        current_stress: float,
-        defense_intelligence: float,
-        caught_contradictions: int,
-        latest_sue_impact: float,
+        cumulative_pressure: float,
     ) -> Tuple[float, float]:
-        raw_odds = self.calculate_raw_odds(
-            current_stress,
-            defense_intelligence,
-            latest_sue_impact,
-            caught_contradictions,
-        )
-        sigmoid_input = (self.w * raw_odds) + self.b
-        sigmoid_input = max(-60.0, min(60.0, sigmoid_input))
-        p_confession = 1.0 / (1.0 + math.exp(-sigmoid_input))
-        return raw_odds, clamp01(p_confession)
+        sigmoid_input = max(-60.0, min(60.0, self.calculate_raw_odds(cumulative_pressure)))
+        p_breakdown = 1.0 / (1.0 + math.exp(-sigmoid_input))
+        return sigmoid_input, clamp01(p_breakdown)
 
     def evaluate_fsm_state(
         self,
-        p_confession: float,
+        p_breakdown: float,
         contradictions: int,
         player_intent: str,
         cooperation: float,
         latest_sue_impact: float = 0.0,
     ) -> str:
-        if p_confession >= CONFESSION_TRIGGER_THRESHOLD:
-            return "Confession / Breakdown"
+        if p_breakdown >= BREAKDOWN_EXPOSURE_THRESHOLD:
+            return EXPOSURE_FSM_STATE
         if (
             latest_sue_impact >= HIGH_IMPACT_SUE_THRESHOLD
             and contradictions >= 1
-            and p_confession >= HIGH_IMPACT_PRESSURED_MIN_CONFESSION
+            and p_breakdown >= HIGH_IMPACT_PRESSURED_MIN_BREAKDOWN
         ):
             return "Pressured / Shaken"
         if player_intent == "Intimidate" and cooperation < 0.2:
             return "Angry / Uncooperative"
-        if 0.4 <= p_confession < CONFESSION_TRIGGER_THRESHOLD:
+        if 0.4 <= p_breakdown < BREAKDOWN_EXPOSURE_THRESHOLD:
             return "Pressured / Shaken"
         return "Idle / Evasion"
 
@@ -580,17 +513,6 @@ def _update_cooperation_score(
     if detect_repeat(history, user_text):
         cooperation -= 0.02
     return clamp01(cooperation)
-
-def _cap_turn_confession_probability(
-    prior_confession_probability: float,
-    model_probability: float,
-    max_gain: float = MAX_MODEL_CONFESSION_GAIN_PER_TURN,
-) -> float:
-    capped_probability = min(
-        clamp01(model_probability),
-        clamp01(prior_confession_probability + max_gain),
-    )
-    return max(clamp01(prior_confession_probability), capped_probability)
 
 def _update_stress_score(
     prior_stress_score: float,
@@ -931,6 +853,46 @@ QUESTION_INTENT_BY_SLOT = {
     "met_victim_that_day": "ask_meeting",
 }
 
+QUESTION_CATEGORY_LABELS = {
+    "basic_fact": "기본 사실 질문",
+    "statement_lock": "진술 고정 질문",
+    "pressure": "압박 질문",
+    "confirmation": "확인 질문",
+    "repeat": "반복 질문",
+    "misc": "기타 질문",
+}
+
+QUESTION_CONFIRMATION_HINTS = (
+    "다시 말씀",
+    "다시 말",
+    "다시 한번",
+    "한 번 더",
+    "정리하면",
+    "확인하자면",
+    "다시 확인",
+    "재차",
+)
+
+QUESTION_STATEMENT_LOCK_HINTS = (
+    "맞지",
+    "맞죠",
+    "맞습니까",
+    "맞나요",
+    "맞다고",
+    "맞잖",
+    "였지",
+    "였죠",
+    "였습니까",
+    "있었던 거 맞",
+    "있었다는 거지",
+    "있었다고 보면",
+    "간 거 맞",
+    "본 거 맞",
+    "라고 했지",
+    "라고 한 거지",
+    "그 말 맞",
+)
+
 SLOT_HINT_PRIORITY = {
     "alibi_claim": 5,
     "crime_place": 4,
@@ -987,6 +949,57 @@ ALIBI_ATTACK_HINTS = (
     "말이 바뀌었",
     "없었다며",
 )
+
+def _question_has_confirmation_cues(text: str) -> bool:
+    lowered = norm(text).lower()
+    squashed = norm_for_match(text)
+    return any(
+        pattern in lowered or norm_for_match(pattern) in squashed
+        for pattern in QUESTION_CONFIRMATION_HINTS
+    )
+
+def _question_has_statement_lock_cues(text: str) -> bool:
+    lowered = norm(text).lower()
+    squashed = norm_for_match(text)
+    return any(
+        pattern in lowered or norm_for_match(pattern) in squashed
+        for pattern in QUESTION_STATEMENT_LOCK_HINTS
+    )
+
+def _classify_question_category(
+    user_text: str,
+    question_analysis: Optional[Dict[str, Any]],
+    repeated_question: bool = False,
+) -> Dict[str, str]:
+    analysis = question_analysis or {}
+    intent = norm(analysis.get("intent", "")).lower()
+    pressure_level = norm(analysis.get("pressure_level", "")).lower()
+    target_slot = norm(analysis.get("target_slot", ""))
+
+    if repeated_question:
+        key = "repeat"
+        reason = "same or very similar question repeated"
+    elif _question_has_confirmation_cues(user_text):
+        key = "confirmation"
+        reason = "question explicitly asks for restatement or clarification"
+    elif target_slot and _question_has_statement_lock_cues(user_text) and intent != "point_contradiction":
+        key = "statement_lock"
+        reason = "question tries to pin the suspect to a direct factual claim"
+    elif intent in {"point_contradiction", "present_evidence"} or pressure_level in {"medium", "high"}:
+        key = "pressure"
+        reason = "question presses with contradiction or evidence-backed pressure"
+    elif intent in QUESTION_INTENT_BY_SLOT.values():
+        key = "basic_fact"
+        reason = "question asks for a core factual detail"
+    else:
+        key = "misc"
+        reason = "question does not map cleanly to the main interrogation categories"
+
+    return {
+        "key": key,
+        "label": QUESTION_CATEGORY_LABELS.get(key, QUESTION_CATEGORY_LABELS["misc"]),
+        "reason": reason,
+    }
 
 def _sanitize_question_analysis(
     case_data: Optional[Dict[str, Any]],
@@ -1341,7 +1354,7 @@ def _dialogue_contradiction_bonus_values(
         severity = "none"
 
     pressure_bonus_candidates = [0.0]
-    confession_bonus_candidates = [0.0]
+    breakdown_bonus_candidates = [0.0]
     soft_dialogue_contradiction = False
 
     if dialogue_signal.get("detective_highlighted"):
@@ -1349,7 +1362,7 @@ def _dialogue_contradiction_bonus_values(
         pressure_bonus_candidates.append(
             DIALOGUE_CONTRADICTION_PRESSURE_BONUS["detective_highlighted"][severity]
         )
-        confession_bonus_candidates.append(
+        breakdown_bonus_candidates.append(
             DIALOGUE_CONTRADICTION_CONFESSION_BONUS["detective_highlighted"][severity]
         )
 
@@ -1358,15 +1371,15 @@ def _dialogue_contradiction_bonus_values(
         pressure_bonus_candidates.append(
             DIALOGUE_CONTRADICTION_PRESSURE_BONUS["suspect_self_contradicted"][severity]
         )
-        confession_bonus_candidates.append(
+        breakdown_bonus_candidates.append(
             DIALOGUE_CONTRADICTION_CONFESSION_BONUS["suspect_self_contradicted"][severity]
         )
 
     pressure_bonus = min(0.03, max(pressure_bonus_candidates))
-    confession_bonus = max(confession_bonus_candidates)
+    breakdown_bonus = max(breakdown_bonus_candidates)
     if severity == "none":
         soft_dialogue_contradiction = False
-    return pressure_bonus, confession_bonus, soft_dialogue_contradiction
+    return pressure_bonus, breakdown_bonus, soft_dialogue_contradiction
 
 def _default_suspect_reply_review(
     reason: str = "",
@@ -1381,14 +1394,23 @@ def _default_suspect_reply_review(
 
 def _empty_progress_state() -> Dict[str, Any]:
     return {
-        "confession_probability": 0.0,
+        "breakdown_probability": 0.0,
         "referenced_evidence_ids": [],
         "established_contradiction_ids": [],
         "stress_score": 0.0,
         "cooperation_score": DEFAULT_COOPERATION_SCORE,
+        "cumulative_pressure": 0.0,
         "fsm_state": DEFAULT_FSM_STATE,
         "last_raw_odds": 0.0,
         "last_sue_impact": 0.0,
+        "statement_collapse_stage": 0,
+        "core_fact_exposed": False,
+        "pad_state": _default_mental_state(),
+        "final_psychological_reaction": "",
+        "selected_personality": {},
+        "statement_records": [],
+        "submitted_judgment": _normalize_submitted_judgment({}),
+        "final_psychological_report": _normalize_final_report_blob({}),
         "turn_count": 0,
     }
 
@@ -1403,22 +1425,30 @@ def _get_progress_state(case_id: str) -> Dict[str, Any]:
 
 def _store_progress_state(
     case_id: str,
-    confession_probability: float,
+    breakdown_probability: float,
     evidence_ids: List[str],
     contradiction_ids: List[str],
     stress_score: float = 0.0,
     cooperation_score: float = DEFAULT_COOPERATION_SCORE,
+    cumulative_pressure: float = 0.0,
     fsm_state: str = DEFAULT_FSM_STATE,
     last_raw_odds: float = 0.0,
     last_sue_impact: float = 0.0,
     turn_count: int = 0,
+    statement_collapse_stage: int = 0,
+    pad_state: Optional[Dict[str, float]] = None,
+    final_psychological_reaction: str = "",
+    selected_personality: Optional[Dict[str, float]] = None,
+    statement_records: Optional[List[Dict[str, Any]]] = None,
+    submitted_judgment: Optional[Dict[str, Any]] = None,
+    final_psychological_report: Optional[Dict[str, Any]] = None,
 ) -> None:
     if not case_id:
         return
 
     INTERROGATION_PROGRESS_CACHE[case_id] = normalize_progress_state(
         {
-            "confession_probability": clamp01(confession_probability),
+            "breakdown_probability": clamp01(breakdown_probability),
             "referenced_evidence_ids": sorted(
                 {str(eid).strip() for eid in (evidence_ids or []) if str(eid).strip()}
             ),
@@ -1427,12 +1457,48 @@ def _store_progress_state(
             ),
             "stress_score": clamp01(stress_score),
             "cooperation_score": clamp01(cooperation_score),
+            "cumulative_pressure": clamp01(cumulative_pressure),
             "fsm_state": norm(fsm_state) or DEFAULT_FSM_STATE,
             "last_raw_odds": float(last_raw_odds),
             "last_sue_impact": float(last_sue_impact),
+            "statement_collapse_stage": max(0, min(5, int(statement_collapse_stage or 0))),
+            "core_fact_exposed": bool(
+                max(0, min(5, int(statement_collapse_stage or 0))) >= 5
+                or clamp01(breakdown_probability) >= BREAKDOWN_EXPOSURE_THRESHOLD
+            ),
+            "pad_state": _normalize_pad_state_blob(pad_state or {}),
+            "final_psychological_reaction": norm(final_psychological_reaction),
+            "selected_personality": _normalize_selected_personality_blob(selected_personality or {}),
+            "statement_records": _normalize_statement_records(statement_records or []),
+            "submitted_judgment": _normalize_submitted_judgment(submitted_judgment or {}),
+            "final_psychological_report": _normalize_final_report_blob(final_psychological_report or {}),
             "turn_count": max(0, int(turn_count or 0)),
         }
     )
+
+def _persist_progress_snapshot(case_id: str, progress_state: Dict[str, Any]) -> Dict[str, Any]:
+    normalized = normalize_progress_state(progress_state or {})
+    _store_progress_state(
+        case_id,
+        normalized.get("breakdown_probability", 0.0),
+        normalized.get("referenced_evidence_ids", []),
+        normalized.get("established_contradiction_ids", []),
+        normalized.get("stress_score", 0.0),
+        normalized.get("cooperation_score", DEFAULT_COOPERATION_SCORE),
+        normalized.get("cumulative_pressure", 0.0),
+        normalized.get("fsm_state", DEFAULT_FSM_STATE),
+        normalized.get("last_raw_odds", 0.0),
+        normalized.get("last_sue_impact", 0.0),
+        normalized.get("turn_count", 0),
+        normalized.get("statement_collapse_stage", 0),
+        normalized.get("pad_state", {}),
+        normalized.get("final_psychological_reaction", ""),
+        normalized.get("selected_personality", {}),
+        normalized.get("statement_records", []),
+        normalized.get("submitted_judgment", {}),
+        normalized.get("final_psychological_report", {}),
+    )
+    return _get_progress_state(case_id)
 
 def _slot_value_tokens(value: str) -> List[str]:
     return re.findall(r"[0-9A-Za-z가-힣]+", norm(value).lower())
@@ -1914,6 +1980,9 @@ def build_case_context(
 
     overview = case_data.get("overview", {}) or {}
     suspect = case_data.get("suspect", {}) or {}
+    suspect_profile = case_data.get("suspect_profile", {}) if isinstance(case_data.get("suspect_profile"), dict) else {}
+    personality = _case_personality(case_data)
+    mental_state = suspect_profile.get("mental_state", {}) if isinstance(suspect_profile.get("mental_state"), dict) else {}
     evidences = _case_evidences(case_data)
 
     evidence_lines = [
@@ -1930,6 +1999,23 @@ def build_case_context(
             if include_hidden_truth else ""
         )
         + f"[Suspect] name:{suspect.get('name', '')} age:{suspect.get('age', '')} job:{suspect.get('job', '')} relation:{suspect.get('relation', '')}\n"
+        + f"[Suspect role] {suspect_profile.get('case_role', '')}\n"
+        + (
+            "[Personality] "
+            + " ".join(
+                f"{trait}:{float(personality.get(trait, 0.5)):.2f}"
+                for trait in BIG_FIVE_TRAITS
+            )
+            + "\n"
+        )
+        + (
+            "[Baseline PAD] "
+            + " ".join(
+                f"{field}:{float(mental_state.get(field, 0.5)):.2f}"
+                for field in PAD_STATE_FIELDS
+            )
+            + "\n"
+        )
         + f"[Default false statement] {case_data.get('false_statement', '')}\n"
         + "[Evidence list]\n"
         + ("\n".join(evidence_lines) if evidence_lines else "- none")
@@ -1940,7 +2026,7 @@ def build_case_context(
             "- Stay consistent with the suspect profile and default false statement.\n"
         )
         + "- Never volunteer hidden facts or unseen evidence unless the detective directly asks that point.\n"
-        + "- When pressured hard, the story may wobble slightly, but do not fully confess unless triggered.\n"
+        + "- When pressure rises, the story may wobble, but do not reveal core facts too early.\n"
         + "\n======================\n"
     )
 
@@ -1956,7 +2042,7 @@ def evaluate_interrogation_progress_v3(
     if not case_data:
         return {
             "pressure_delta": 0.0,
-            "confession_probability": 0.0,
+            "breakdown_probability": 0.0,
             "cumulative_evidence_ids": [],
             "cumulative_contradiction_ids": [],
             "hard_contradiction_ids": [],
@@ -1964,27 +2050,46 @@ def evaluate_interrogation_progress_v3(
             "soft_dialogue_severity": "none",
             "stress_score": 0.0,
             "cooperation_score": DEFAULT_COOPERATION_SCORE,
+            "cumulative_pressure": 0.0,
+            "turn_pressure_gain": 0.0,
             "defense_intelligence": 0.65,
             "latest_sue_impact": 0.0,
             "raw_odds": 0.0,
             "player_intent": "Neutral",
             "fsm_state": DEFAULT_FSM_STATE,
+            "statement_collapse_stage": 0,
+            "statement_collapse_label": _statement_collapse_label(0),
+            "core_fact_exposed": False,
+            "pad_state": _default_mental_state(),
+            "final_psychological_reaction": "",
+            "personality_response_factors": {},
+            "personality_response_breakdown": {},
             "pressure_components": {
                 "evidence": 0.0,
                 "hard_contradiction": 0.0,
                 "soft_dialogue": 0.0,
                 "pressure_level": 0.0,
+                "progression": 0.0,
+                "sue": 0.0,
             },
         }
 
     signal = interrogation_signal or llm_evaluate_interrogation(case_data, history, user_text)
     prior_progress = prior_progress or _empty_progress_state()
 
-    prior_confession_probability = clamp01(prior_progress.get("confession_probability", 0.0))
     prior_stress_score = clamp01(prior_progress.get("stress_score", 0.0))
     prior_cooperation_score = clamp01(
         prior_progress.get("cooperation_score", DEFAULT_COOPERATION_SCORE)
     )
+    prior_cumulative_pressure = clamp01(
+        prior_progress.get("cumulative_pressure", prior_progress.get("stress_score", 0.0))
+    )
+    prior_statement_collapse_stage = max(
+        0,
+        min(5, int(safe_float(prior_progress.get("statement_collapse_stage", 0), 0.0))),
+    )
+    baseline_pad_state = _case_baseline_pad_state(case_data)
+    prior_pad_state = _normalize_pad_state_blob(prior_progress.get("pad_state", baseline_pad_state))
     prior_evidence_ids = {
         str(eid).strip()
         for eid in (prior_progress.get("referenced_evidence_ids", []) or [])
@@ -2019,7 +2124,14 @@ def evaluate_interrogation_progress_v3(
     if pressure_level not in PRESSURE_LEVEL_BONUS:
         pressure_level = "none"
 
-    dialogue_pressure_bonus, dialogue_confession_bonus, soft_dialogue_contradiction = (
+    player_intent = _infer_player_intent(signal)
+    personality_response_factors = _calculate_personality_response_factors(
+        case_data,
+        player_intent,
+    )
+    repeated_question = detect_repeat(history, user_text)
+
+    dialogue_pressure_bonus, dialogue_breakdown_bonus, soft_dialogue_contradiction = (
         _dialogue_contradiction_bonus_values(dialogue_contradiction_signal)
     )
     evidence_pressure = (
@@ -2032,10 +2144,10 @@ def evaluate_interrogation_progress_v3(
     )
     pressure_level_bonus = PRESSURE_LEVEL_BONUS.get(pressure_level, 0.0)
     pressure_components = {
-        "evidence": evidence_pressure,
-        "hard_contradiction": hard_contradiction_pressure,
-        "soft_dialogue": dialogue_pressure_bonus,
-        "pressure_level": pressure_level_bonus,
+        "evidence": evidence_pressure * personality_response_factors["pressure_multiplier"],
+        "hard_contradiction": hard_contradiction_pressure * personality_response_factors["pressure_multiplier"],
+        "soft_dialogue": dialogue_pressure_bonus * max(0.85, min(1.35, personality_response_factors["arousal_sensitivity"])),
+        "pressure_level": pressure_level_bonus * personality_response_factors["pressure_multiplier"],
     }
     pressure_delta = (
         pressure_components["evidence"]
@@ -2047,7 +2159,7 @@ def evaluate_interrogation_progress_v3(
     if not user_text or is_too_ambiguous(user_text):
         pressure_components = {key: 0.0 for key in pressure_components}
         pressure_delta = 0.0
-    elif detect_repeat(history, user_text):
+    elif repeated_question:
         pressure_components = {
             key: value * 0.35 for key, value in pressure_components.items()
         }
@@ -2070,8 +2182,11 @@ def evaluate_interrogation_progress_v3(
         history,
         user_text,
     )
-
-    player_intent = _infer_player_intent(signal)
+    stress_score = _apply_personality_scaled_delta(
+        prior_stress_score,
+        stress_score,
+        personality_response_factors["stress_multiplier"],
+    )
     cooperation_score = _update_cooperation_score(
         prior_cooperation_score,
         player_intent,
@@ -2081,6 +2196,19 @@ def evaluate_interrogation_progress_v3(
         history,
         user_text,
     )
+    cooperation_score = clamp01(
+        cooperation_score + personality_response_factors["cooperation_shift"]
+    )
+    pad_state = _update_pad_state(
+        prior_pad_state,
+        case_data,
+        player_intent,
+        pressure_delta,
+        len(new_evidence_ids),
+        len(new_contradiction_ids),
+        soft_dialogue_contradiction,
+        repeated_question,
+    )
     defense_intelligence = _infer_defense_intelligence(case_data)
     core = _build_interrogation_core(case_data)
     latest_sue_impact = _calculate_latest_sue_impact(
@@ -2089,43 +2217,73 @@ def evaluate_interrogation_progress_v3(
         list(current_contradiction_ids),
         core,
     )
-    raw_odds, confession_probability = core.calculate_confession_probability(
-        stress_score,
-        defense_intelligence,
-        len(cumulative_contradiction_ids),
-        latest_sue_impact,
-    )
-    direct_bonus = 0.0
+    progression_pressure = 0.0
     if signal.get("intent") in {"ask_time", "ask_place", "ask_alibi", "ask_action"}:
-        direct_bonus += CORE_QUESTION_CONFESSION_BONUS
+        progression_pressure += CORE_QUESTION_PRESSURE_BONUS
     if new_evidence_ids:
-        direct_bonus += NEW_EVIDENCE_DIRECT_CONFESSION_BONUS
+        progression_pressure += NEW_EVIDENCE_PRESSURE_PROGRESS_BONUS
     if new_contradiction_ids:
-        direct_bonus += NEW_CONTRADICTION_DIRECT_CONFESSION_BONUS
-    direct_bonus += dialogue_confession_bonus
-    confession_probability = _cap_turn_confession_probability(
-        prior_confession_probability,
-        confession_probability + direct_bonus,
+        progression_pressure += NEW_CONTRADICTION_PRESSURE_PROGRESS_BONUS
+    if soft_dialogue_contradiction:
+        progression_pressure += SOFT_DIALOGUE_PRESSURE_PROGRESS_BONUS
+
+    progression_pressure *= personality_response_factors["direct_bonus_multiplier"]
+    sue_pressure = 0.0
+    if current_contradiction_ids and latest_sue_impact > 0.0:
+        sue_pressure = min(0.08, latest_sue_impact * SUE_PRESSURE_BONUS_SCALE)
+
+    if repeated_question:
+        progression_pressure *= 0.35
+        sue_pressure *= 0.5
+
+    pressure_components["progression"] = progression_pressure
+    pressure_components["sue"] = sue_pressure
+    turn_cumulative_pressure_gain = min(
+        MAX_TURN_CUMULATIVE_PRESSURE_GAIN,
+        pressure_delta + progression_pressure + sue_pressure + dialogue_breakdown_bonus,
     )
-
-    if detect_repeat(history, user_text):
-        confession_probability = min(
-            confession_probability,
-            prior_confession_probability + 0.02,
-        )
-
-    confession_probability = clamp01(confession_probability)
+    cumulative_pressure = clamp01(prior_cumulative_pressure + turn_cumulative_pressure_gain)
+    raw_odds, breakdown_probability = core.calculate_breakdown_probability(
+        cumulative_pressure
+    )
+    statement_collapse_stage = _calculate_statement_collapse_stage(
+        prior_statement_collapse_stage,
+        cumulative_pressure,
+        breakdown_probability,
+        len(cumulative_contradiction_ids),
+        len(current_contradiction_ids),
+        soft_dialogue_contradiction,
+        pad_state,
+        case_data,
+    )
     fsm_state = core.evaluate_fsm_state(
-        confession_probability,
+        breakdown_probability,
         len(cumulative_contradiction_ids),
         player_intent,
         cooperation_score,
         latest_sue_impact,
     )
+    if statement_collapse_stage >= 4 and fsm_state != EXPOSURE_FSM_STATE:
+        fsm_state = "Pressured / Shaken"
+    elif statement_collapse_stage >= 2 and fsm_state == DEFAULT_FSM_STATE:
+        fsm_state = "Pressured / Shaken"
+    final_psychological_reaction = ""
+    core_fact_exposed = bool(
+        statement_collapse_stage >= 5 or breakdown_probability >= BREAKDOWN_EXPOSURE_THRESHOLD
+    )
+    if core_fact_exposed:
+        statement_collapse_stage = 5
+        fsm_state = EXPOSURE_FSM_STATE
+        final_psychological_reaction = _generate_final_psychological_reaction(
+            case_data,
+            statement_collapse_stage,
+            pad_state,
+            True,
+        )
 
     return {
-        "pressure_delta": pressure_delta,
-        "confession_probability": confession_probability,
+        "pressure_delta": turn_cumulative_pressure_gain,
+        "breakdown_probability": breakdown_probability,
         "cumulative_evidence_ids": sorted(cumulative_evidence_ids),
         "cumulative_contradiction_ids": sorted(cumulative_contradiction_ids),
         "hard_contradiction_ids": sorted(current_contradiction_ids),
@@ -2135,11 +2293,26 @@ def evaluate_interrogation_progress_v3(
         ).strip().lower() if isinstance(dialogue_contradiction_signal, dict) else "none",
         "stress_score": stress_score,
         "cooperation_score": cooperation_score,
+        "cumulative_pressure": cumulative_pressure,
+        "turn_pressure_gain": turn_cumulative_pressure_gain,
         "defense_intelligence": defense_intelligence,
         "latest_sue_impact": latest_sue_impact,
         "raw_odds": raw_odds,
         "player_intent": player_intent,
         "fsm_state": fsm_state,
+        "statement_collapse_stage": statement_collapse_stage,
+        "statement_collapse_label": _statement_collapse_label(statement_collapse_stage),
+        "core_fact_exposed": core_fact_exposed,
+        "pad_state": pad_state,
+        "final_psychological_reaction": final_psychological_reaction,
+        "personality_response_factors": {
+            key: round(value, 4)
+            for key, value in personality_response_factors.items()
+        },
+        "personality_response_breakdown": _build_personality_response_breakdown(
+            case_data,
+            player_intent,
+        ),
         "pressure_components": {
             "evidence": round(pressure_components["evidence"], 4),
             "hard_contradiction": round(pressure_components["hard_contradiction"], 4),
@@ -2209,126 +2382,646 @@ async def tts_to_b64(text: str) -> str:
 
     return base64.b64encode(wav_bytes).decode("ascii")
 
-# =========================================================
-# CASE GENERATION (Structured Outputs) - 현재 JSON 스키마
-# =========================================================
-CASE_JSON_SCHEMA = {
-    "type": "object",
-    "additionalProperties": False,
-    "properties": {
-        "case_id": {"type": "string"},
-        "overview": {
-            "type": "object",
-            "additionalProperties": False,
-            "properties": {
-                "time": {"type": "string"},
-                "place": {"type": "string"},
-                "type": {"type": "string"},
-            },
-            "required": ["time", "place", "type"],
-        },
-        "motive": {"type": "string"},
-        "crime_flow": {"type": "string"},
-        "suspect": {
-            "type": "object",
-            "additionalProperties": False,
-            "properties": {
-                "name": {"type": "string"},
-                "age": {"type": "integer"},
-                "job": {"type": "string"},
-                "relation": {"type": "string"},
-            },
-            "required": ["name", "age", "job", "relation"],
-        },
-        "false_statement": {"type": "string"},
-        "truth_slots": {
-            "type": "object",
-            "additionalProperties": False,
-            "properties": {
-                "crime_time": {"type": "string"},
-                "crime_place": {"type": "string"},
-                "weapon": {"type": "string"},
-                "victim_relation": {"type": "string"},
-                "alibi_claim": {"type": "string"},
-                "actual_action": {"type": "string"},
-                "last_seen_place": {"type": "string"},
-                "met_victim_that_day": {"type": "string"},
-            },
-            "required": TRUTH_SLOT_NAMES,
-        },
-        "evidences": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "additionalProperties": False,
-                "properties": {
-                    "id": {"type": "string"},
-                    "name": {"type": "string"},
-                    "description": {"type": "string"},
-                    "aliases": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                    },
-                },
-                "required": ["id", "name", "description", "aliases"],
-            },
-            "minItems": 4,
-            "maxItems": 5,
-        },
-        "contradictions": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "additionalProperties": False,
-                "properties": {
-                    "id": {"type": "string"},
-                    "description": {"type": "string"},
-                    "related_evidence": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                    },
-                    "slot": {
-                        "type": "string",
-                        "enum": TRUTH_SLOT_NAMES,
-                    },
-                    "truth_value": {"type": "string"},
-                    "contradiction_type": {
-                        "type": "string",
-                        "enum": sorted(VALID_CONTRADICTION_TYPES),
-                    },
-                },
-                "required": [
-                    "id",
-                    "description",
-                    "related_evidence",
-                    "slot",
-                    "truth_value",
-                    "contradiction_type",
-                ],
-            },
-            "minItems": 3,
-            "maxItems": 4,
-        },
-    },
-    "required": [
-        "case_id",
-        "overview",
-        "motive",
-        "crime_flow",
-        "suspect",
-        "false_statement",
-        "truth_slots",
-        "evidences",
-        "contradictions",
-    ],
+BIG_FIVE_TRAITS = (
+    "openness",
+    "conscientiousness",
+    "extraversion",
+    "agreeableness",
+    "neuroticism",
+)
+
+PAD_STATE_FIELDS = (
+    "pleasure",
+    "arousal",
+    "dominance",
+)
+
+STATEMENT_COLLAPSE_LABELS = {
+    0: "안정적 부인",
+    1: "경계",
+    2: "흔들림",
+    3: "부분 수정",
+    4: "진술 붕괴",
+    5: "핵심 사실 노출",
 }
 
+JUDGMENT_CHOICE_LABELS = {
+    "principal": "주범",
+    "accomplice_or_coverup": "공범 또는 은폐 가능성",
+    "not_directly_involved": "범행과 직접 관련 없음",
+}
+
+JUDGMENT_CHOICE_ALIASES = {
+    "principal": "principal",
+    "주범": "principal",
+    "main": "principal",
+    "accomplice_or_coverup": "accomplice_or_coverup",
+    "accomplice": "accomplice_or_coverup",
+    "coverup": "accomplice_or_coverup",
+    "공범": "accomplice_or_coverup",
+    "은폐": "accomplice_or_coverup",
+    "공범 또는 은폐 가능성": "accomplice_or_coverup",
+    "not_directly_involved": "not_directly_involved",
+    "not_involved": "not_directly_involved",
+    "irrelevant": "not_directly_involved",
+    "무관": "not_directly_involved",
+    "범행과 직접 관련 없음": "not_directly_involved",
+}
+
+MAX_STATEMENT_RECORDS = 40
+def _to_clamped_float(value: Any, default: float = 0.5) -> float:
+    try:
+        return clamp01(float(value))
+    except Exception:
+        return clamp01(default)
+
+def _normalize_string_list(values: Any) -> List[str]:
+    if isinstance(values, list):
+        return uniq_strings([norm(str(value)) for value in values if norm(str(value))])
+    if isinstance(values, str):
+        text = norm(values)
+        return [text] if text else []
+    return []
+
+def _default_personality() -> Dict[str, float]:
+    return {trait: 0.5 for trait in BIG_FIVE_TRAITS}
+
+def _default_mental_state() -> Dict[str, float]:
+    return {field: 0.5 for field in PAD_STATE_FIELDS}
+
+def _normalize_pad_state_blob(blob: Any) -> Dict[str, float]:
+    raw = blob if isinstance(blob, dict) else {}
+    normalized = _default_mental_state()
+    for field in PAD_STATE_FIELDS:
+        normalized[field] = _to_clamped_float(raw.get(field, normalized[field]), normalized[field])
+    return normalized
+
+def _normalize_personality_blob(blob: Any) -> Dict[str, float]:
+    raw = blob if isinstance(blob, dict) else {}
+    normalized = _default_personality()
+    for trait in BIG_FIVE_TRAITS:
+        normalized[trait] = _to_clamped_float(raw.get(trait, normalized[trait]), normalized[trait])
+    return normalized
+
+def _missing_big_five_traits(blob: Any) -> List[str]:
+    raw = blob if isinstance(blob, dict) else {}
+    return [trait for trait in BIG_FIVE_TRAITS if trait not in raw]
+
+def _validate_selected_personality_payload(blob: Any) -> Tuple[Dict[str, float], List[str]]:
+    missing_traits = _missing_big_five_traits(blob)
+    if missing_traits:
+        return {}, missing_traits
+    return _normalize_personality_blob(blob), []
+
+def _normalize_selected_personality_blob(blob: Any) -> Dict[str, float]:
+    raw = blob if isinstance(blob, dict) else {}
+    if _missing_big_five_traits(raw):
+        return {}
+    return _normalize_personality_blob(raw)
+
+def _selected_personality_from_progress(progress_state: Optional[Dict[str, Any]]) -> Dict[str, float]:
+    progress = progress_state if isinstance(progress_state, dict) else {}
+    return _normalize_selected_personality_blob(
+        progress.get("selected_personality", {})
+    )
+
+def _resolve_selected_personality(
+    case_data: Optional[Dict[str, Any]],
+    progress_state: Optional[Dict[str, Any]] = None,
+    personality_blob: Any = None,
+) -> Dict[str, float]:
+    raw = personality_blob if isinstance(personality_blob, dict) else None
+    if raw is None:
+        return _selected_personality_from_progress(progress_state)
+    if _missing_big_five_traits(raw):
+        return {}
+    return _normalize_personality_blob(raw)
+
+def _normalize_statement_record(record: Any) -> Dict[str, Any]:
+    raw = record if isinstance(record, dict) else {}
+    try:
+        turn_index = int(raw.get("turn_index", 0) or 0)
+    except (TypeError, ValueError):
+        turn_index = 0
+
+    hard_contradiction_ids = raw.get("hard_contradiction_ids", [])
+    if not isinstance(hard_contradiction_ids, list):
+        hard_contradiction_ids = []
+
+    question_category = norm(raw.get("question_category", ""))
+    if question_category not in QUESTION_CATEGORY_LABELS:
+        question_category = _classify_question_category(
+            norm(raw.get("question_text", "")),
+            {
+                "intent": raw.get("question_intent", ""),
+                "target_slot": raw.get("target_slot", ""),
+                "pressure_level": raw.get("pressure_level", ""),
+            },
+            False,
+        )["key"]
+
+    return {
+        "turn_index": max(0, turn_index),
+        "question_text": norm(raw.get("question_text", "")),
+        "question_intent": norm(raw.get("question_intent", "")),
+        "question_category": question_category,
+        "question_category_label": QUESTION_CATEGORY_LABELS.get(
+            question_category,
+            QUESTION_CATEGORY_LABELS["misc"],
+        ),
+        "target_slot": norm(raw.get("target_slot", "")),
+        "pressure_level": norm(raw.get("pressure_level", "")),
+        "npc_answer": norm(raw.get("npc_answer", "")),
+        "core_claim": norm(raw.get("core_claim", "")),
+        "claimed_value": norm(raw.get("claimed_value", "")),
+        "hard_contradiction_ids": uniq_strings([norm(str(value)) for value in hard_contradiction_ids if norm(str(value))]),
+        "soft_dialogue_contradiction": bool(raw.get("soft_dialogue_contradiction", False)),
+        "pad_state": _normalize_pad_state_blob(raw.get("pad_state", {})),
+        "statement_collapse_stage": max(
+            0,
+            min(5, int(safe_float(raw.get("statement_collapse_stage", 0), 0.0))),
+        ),
+        "cumulative_pressure": clamp01(raw.get("cumulative_pressure", 0.0)),
+        "statement_collapse_label": norm(raw.get("statement_collapse_label", "")),
+        "fsm_state": norm(raw.get("fsm_state", "")),
+        "breakdown_probability": clamp01(
+            raw.get("breakdown_probability", 0.0)
+        ),
+        "core_fact_exposed": bool(raw.get("core_fact_exposed", False)),
+    }
+
+def _normalize_statement_records(values: Any) -> List[Dict[str, Any]]:
+    if not isinstance(values, list):
+        return []
+    records = [_normalize_statement_record(value) for value in values]
+    return records[-MAX_STATEMENT_RECORDS:]
+
+def _normalize_judgment_choice(value: Any) -> str:
+    key = norm(str(value))
+    return JUDGMENT_CHOICE_ALIASES.get(key, "")
+
+def _normalize_submitted_judgment(blob: Any) -> Dict[str, Any]:
+    raw = blob if isinstance(blob, dict) else {}
+    choice_key = _normalize_judgment_choice(raw.get("choice_key") or raw.get("choice") or raw.get("label"))
+    return {
+        "choice_key": choice_key,
+        "choice_label": JUDGMENT_CHOICE_LABELS.get(choice_key, ""),
+        "notes": norm(raw.get("notes", "")),
+        "turn_count": max(0, int(safe_float(raw.get("turn_count", 0), 0.0))),
+    }
+
+def _normalize_final_report_blob(blob: Any) -> Dict[str, Any]:
+    raw = blob if isinstance(blob, dict) else {}
+    return {
+        "case_id": norm(raw.get("case_id", "")),
+        "case_role": norm(raw.get("case_role", "")),
+        "turn_count": max(0, int(safe_float(raw.get("turn_count", 0), 0.0))),
+        "breakdown_probability": clamp01(
+            raw.get("breakdown_probability", 0.0)
+        ),
+        "statement_collapse_stage": max(
+            0,
+            min(5, int(safe_float(raw.get("statement_collapse_stage", 0), 0.0))),
+        ),
+        "statement_collapse_label": norm(raw.get("statement_collapse_label", "")),
+        "core_fact_exposed": bool(raw.get("core_fact_exposed", False)),
+        "pad_state": _normalize_pad_state_blob(raw.get("pad_state", {})),
+        "final_psychological_reaction": norm(raw.get("final_psychological_reaction", "")),
+        "hard_contradiction_count": max(0, int(safe_float(raw.get("hard_contradiction_count", 0), 0.0))),
+        "evidence_reference_count": max(0, int(safe_float(raw.get("evidence_reference_count", 0), 0.0))),
+        "cooperation_score": clamp01(raw.get("cooperation_score", DEFAULT_COOPERATION_SCORE)),
+        "stress_score": clamp01(raw.get("stress_score", 0.0)),
+        "personality": _normalize_personality_blob(raw.get("personality", {})),
+        "summary_tags": _normalize_string_list(raw.get("summary_tags", [])),
+        "judgment_ready": bool(raw.get("judgment_ready", False)),
+    }
+
+def _case_default_personality(case_data: Optional[Dict[str, Any]]) -> Dict[str, float]:
+    suspect_profile = case_data.get("suspect_profile", {}) if isinstance(case_data, dict) else {}
+    personality = {}
+    if isinstance(suspect_profile, dict):
+        if isinstance(suspect_profile.get("default_personality"), dict):
+            personality = suspect_profile.get("default_personality", {})
+        elif isinstance(suspect_profile.get("personality"), dict):
+            personality = suspect_profile.get("personality", {})
+    normalized = _default_personality()
+    for trait in BIG_FIVE_TRAITS:
+        normalized[trait] = _to_clamped_float(personality.get(trait, normalized[trait]), normalized[trait])
+    return normalized
+
+def _case_personality(case_data: Optional[Dict[str, Any]]) -> Dict[str, float]:
+    suspect_profile = case_data.get("suspect_profile", {}) if isinstance(case_data, dict) else {}
+    selected = suspect_profile.get("selected_personality", {}) if isinstance(suspect_profile, dict) else {}
+    normalized_selected = _normalize_selected_personality_blob(selected)
+    if normalized_selected:
+        return normalized_selected
+    return _case_default_personality(case_data)
+
+def _case_baseline_pad_state(case_data: Optional[Dict[str, Any]]) -> Dict[str, float]:
+    suspect_profile = case_data.get("suspect_profile", {}) if isinstance(case_data, dict) else {}
+    mental_state = suspect_profile.get("mental_state", {}) if isinstance(suspect_profile, dict) else {}
+    return _normalize_pad_state_blob(mental_state)
+
+def _apply_selected_personality_to_case(
+    case_data: Optional[Dict[str, Any]],
+    selected_personality: Optional[Dict[str, float]],
+) -> Optional[Dict[str, Any]]:
+    if not case_data:
+        return case_data
+    selected = _normalize_personality_blob(selected_personality or {})
+    if not selected_personality:
+        return case_data
+
+    effective_case = copy.deepcopy(case_data)
+    suspect_profile = effective_case.get("suspect_profile", {})
+    if not isinstance(suspect_profile, dict):
+        suspect_profile = {}
+        effective_case["suspect_profile"] = suspect_profile
+    suspect_profile["selected_personality"] = selected
+    return effective_case
+
+def _effective_case_from_progress(
+    case_data: Optional[Dict[str, Any]],
+    progress_state: Optional[Dict[str, Any]] = None,
+    selected_personality: Optional[Dict[str, float]] = None,
+) -> Optional[Dict[str, Any]]:
+    selected = selected_personality
+    if selected is None and isinstance(progress_state, dict):
+        selected = _selected_personality_from_progress(progress_state)
+    return _apply_selected_personality_to_case(case_data, selected)
+
+def _extract_core_claim_text(suspect_text: str, claimed_value: str = "") -> str:
+    claim = norm(claimed_value)
+    if claim:
+        return claim
+    text = trim_to_1_3_sentences(suspect_text)
+    if not text:
+        return ""
+    parts = re.split(r"(?<=[\.!\?。！？])\s+", text)
+    return norm(parts[0] if parts else text)
+
+def _case_result_choice_key(case_data: Optional[Dict[str, Any]]) -> str:
+    suspect_profile = case_data.get("suspect_profile", {}) if isinstance(case_data, dict) else {}
+    role = norm(suspect_profile.get("case_role", ""))
+    if any(keyword in role for keyword in ("주범", "실행범", "범인")):
+        return "principal"
+    if any(keyword in role for keyword in ("공범", "은폐", "교사", "방조")):
+        return "accomplice_or_coverup"
+    return "not_directly_involved"
+
+def _build_final_psychological_report(
+    case_data: Optional[Dict[str, Any]],
+    progress_state: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    progress = normalize_progress_state(progress_state or {})
+    effective_case = _effective_case_from_progress(case_data, progress)
+    personality = _case_personality(effective_case)
+    stage = max(0, min(5, int(safe_float(progress.get("statement_collapse_stage", 0), 0.0))))
+    summary_tags: List[str] = []
+    if stage >= 4:
+        summary_tags.append("statement_breakdown")
+    elif stage >= 2:
+        summary_tags.append("statement_wobble")
+    else:
+        summary_tags.append("stable_denial")
+    if progress.get("cumulative_pressure", 0.0) >= 0.7:
+        summary_tags.append("high_interrogation_pressure")
+    if progress.get("core_fact_exposed", False):
+        summary_tags.append("core_fact_exposed")
+    if progress.get("pad_state", {}).get("arousal", 0.0) >= 0.7:
+        summary_tags.append("high_arousal")
+    if progress.get("pad_state", {}).get("dominance", 1.0) <= 0.35:
+        summary_tags.append("low_dominance")
+
+    return _normalize_final_report_blob(
+        {
+            "case_id": norm((effective_case or {}).get("case_id", "")),
+            "case_role": norm(((effective_case or {}).get("suspect_profile", {}) or {}).get("case_role", "")),
+            "turn_count": progress.get("turn_count", 0),
+            "breakdown_probability": progress.get(
+                "breakdown_probability",
+                0.0,
+            ),
+            "statement_collapse_stage": stage,
+            "cumulative_pressure": progress.get("cumulative_pressure", 0.0),
+            "statement_collapse_label": _statement_collapse_label(stage),
+            "core_fact_exposed": bool(progress.get("core_fact_exposed", False) or stage >= 5),
+            "pad_state": progress.get("pad_state", _default_mental_state()),
+            "final_psychological_reaction": progress.get("final_psychological_reaction", ""),
+            "hard_contradiction_count": len(progress.get("established_contradiction_ids", []) or []),
+            "evidence_reference_count": len(progress.get("referenced_evidence_ids", []) or []),
+            "cooperation_score": progress.get("cooperation_score", DEFAULT_COOPERATION_SCORE),
+            "stress_score": progress.get("stress_score", 0.0),
+            "personality": personality,
+            "summary_tags": summary_tags,
+            "judgment_ready": bool(
+                progress.get("turn_count", 0) >= MAX_GAME_TURNS
+                or progress.get("core_fact_exposed", False)
+                or stage >= 4
+            ),
+        }
+    )
+
+def _build_statement_record(
+    turn_index: int,
+    user_text: str,
+    question_analysis: Dict[str, Any],
+    suspect_text: str,
+    rule_based_turn: Dict[str, Any],
+    progress_eval: Dict[str, Any],
+    repeated_question: bool = False,
+) -> Dict[str, Any]:
+    stage = max(0, min(5, int(safe_float(progress_eval.get("statement_collapse_stage", 0), 0.0))))
+    question_category = _classify_question_category(
+        user_text,
+        question_analysis,
+        repeated_question,
+    )
+    return _normalize_statement_record(
+        {
+            "turn_index": turn_index,
+            "question_text": user_text,
+            "question_intent": question_analysis.get("intent", ""),
+            "question_category": question_category["key"],
+            "question_category_label": question_category["label"],
+            "target_slot": question_analysis.get("target_slot", ""),
+            "pressure_level": question_analysis.get("pressure_level", ""),
+            "npc_answer": suspect_text,
+            "core_claim": _extract_core_claim_text(
+                suspect_text,
+                rule_based_turn.get("claimed_value", ""),
+            ),
+            "claimed_value": rule_based_turn.get("claimed_value", ""),
+            "hard_contradiction_ids": rule_based_turn.get("hard_contradiction_ids", []),
+            "soft_dialogue_contradiction": rule_based_turn.get("soft_dialogue_contradiction", False),
+            "pad_state": progress_eval.get("pad_state", {}),
+            "statement_collapse_stage": stage,
+            "statement_collapse_label": _statement_collapse_label(stage),
+            "fsm_state": progress_eval.get("fsm_state", ""),
+            "breakdown_probability": progress_eval.get(
+                "breakdown_probability",
+                0.0,
+            ),
+            "core_fact_exposed": progress_eval.get("core_fact_exposed", False),
+        }
+    )
+
+def _statement_collapse_label(stage: int) -> str:
+    return STATEMENT_COLLAPSE_LABELS.get(max(0, min(5, int(stage))), STATEMENT_COLLAPSE_LABELS[0])
+
+def _calculate_personality_response_factors(
+    case_data: Optional[Dict[str, Any]],
+    player_intent: str,
+) -> Dict[str, float]:
+    personality = _case_personality(case_data)
+    openness = personality["openness"]
+    conscientiousness = personality["conscientiousness"]
+    extraversion = personality["extraversion"]
+    agreeableness = personality["agreeableness"]
+    neuroticism = personality["neuroticism"]
+
+    pressure_multiplier = 1.0 + (0.18 * neuroticism) - (0.12 * conscientiousness)
+    if player_intent == "Rapport":
+        pressure_multiplier -= 0.08 * agreeableness
+    elif player_intent == "Intimidate":
+        pressure_multiplier += 0.05 + (0.06 * neuroticism)
+    elif player_intent == "Confront":
+        pressure_multiplier += 0.03 + (0.04 * openness)
+
+    return {
+        "pressure_multiplier": max(0.75, min(1.45, pressure_multiplier)),
+        "stress_multiplier": max(0.7, min(1.6, 0.88 + (0.62 * neuroticism) - (0.20 * conscientiousness))),
+        "direct_bonus_multiplier": max(0.8, min(1.45, 0.96 + (0.28 * neuroticism) + (0.10 * agreeableness) - (0.18 * conscientiousness))),
+        "cooperation_shift": max(-0.12, min(0.12, ((agreeableness - 0.5) * 0.10) + ((extraversion - 0.5) * 0.04) - ((neuroticism - 0.5) * 0.04))),
+        "arousal_sensitivity": max(0.8, min(1.7, 0.95 + (0.70 * neuroticism) + (0.10 * openness))),
+        "dominance_resistance": max(0.75, min(1.4, 0.90 + (0.45 * conscientiousness) - (0.10 * agreeableness))),
+        "collapse_resistance": max(0.7, min(1.5, 0.95 + (0.80 * conscientiousness) - (0.20 * neuroticism))),
+        "rapport_affinity": max(0.8, min(1.3, 0.95 + (0.40 * agreeableness))),
+        "reply_length_bias": max(0.8, min(1.25, 0.90 + (0.40 * extraversion))),
+    }
+
+def _build_personality_response_breakdown(
+    case_data: Optional[Dict[str, Any]],
+    player_intent: str,
+) -> Dict[str, Any]:
+    personality = _case_personality(case_data)
+    factors = _calculate_personality_response_factors(case_data, player_intent)
+    intent_shift = {
+        "Rapport": "agreeableness lowers pressure and supports cooperation",
+        "Probe": "neutral factual pressure",
+        "Confront": "openness slightly raises response volatility",
+        "Intimidate": "neuroticism raises pressure and arousal sensitivity",
+        "Neutral": "baseline interpretation",
+    }.get(player_intent, "baseline interpretation")
+    return {
+        "traits": {key: round(value, 3) for key, value in personality.items()},
+        "intent": player_intent,
+        "intent_effect": intent_shift,
+        "computed_factors": {key: round(value, 3) for key, value in factors.items()},
+        "readout": {
+            "pressure": "higher neuroticism increases felt pressure; higher conscientiousness resists it",
+            "cooperation": "agreeableness and extraversion soften cooperation loss",
+            "collapse": "conscientiousness delays collapse, neuroticism accelerates wobble",
+            "pad": "neuroticism pushes arousal up faster, agreeableness lowers dominance under pressure",
+            "model": "turn pressure accumulates into cumulative_pressure, then sigmoid converts it to breakdown_probability",
+        },
+    }
+
+def _apply_personality_scaled_delta(
+    prior_value: float,
+    updated_value: float,
+    multiplier: float,
+) -> float:
+    delta = updated_value - prior_value
+    return clamp01(prior_value + (delta * multiplier))
+
+def _update_pad_state(
+    prior_pad_state: Dict[str, float],
+    case_data: Optional[Dict[str, Any]],
+    player_intent: str,
+    pressure_delta: float,
+    new_evidence_count: int,
+    new_contradiction_count: int,
+    soft_dialogue_contradiction: bool,
+    repeated_question: bool,
+) -> Dict[str, float]:
+    personality = _case_personality(case_data)
+    factors = _calculate_personality_response_factors(case_data, player_intent)
+    neuroticism = personality["neuroticism"]
+    conscientiousness = personality["conscientiousness"]
+    agreeableness = personality["agreeableness"]
+
+    pleasure = prior_pad_state.get("pleasure", 0.5)
+    arousal = prior_pad_state.get("arousal", 0.5)
+    dominance = prior_pad_state.get("dominance", 0.5)
+
+    contradiction_impact = 0.05 * float(new_contradiction_count)
+    evidence_impact = 0.02 * float(new_evidence_count)
+    soft_impact = 0.02 if soft_dialogue_contradiction else 0.0
+
+    pleasure_delta = -pressure_delta * (0.16 + (0.12 * neuroticism))
+    pleasure_delta -= contradiction_impact * (0.8 - (0.3 * agreeableness))
+    pleasure_delta -= evidence_impact * 0.5
+    if player_intent == "Rapport":
+        pleasure_delta += 0.025 * factors["rapport_affinity"]
+    elif player_intent == "Intimidate":
+        pleasure_delta -= 0.02
+    if repeated_question:
+        pleasure_delta -= 0.015
+
+    arousal_delta = pressure_delta * (0.30 + (0.35 * factors["arousal_sensitivity"]))
+    arousal_delta += contradiction_impact + evidence_impact + soft_impact
+    if player_intent == "Rapport":
+        arousal_delta -= 0.02
+    elif player_intent == "Intimidate":
+        arousal_delta += 0.015
+
+    dominance_delta = -pressure_delta * (0.22 + (0.18 * agreeableness))
+    dominance_delta -= (0.045 * float(new_contradiction_count))
+    dominance_delta += 0.02 * (conscientiousness - 0.5)
+    if player_intent == "Rapport":
+        dominance_delta += 0.01
+    if repeated_question:
+        dominance_delta += 0.005
+
+    next_pad = {
+        "pleasure": clamp01(pleasure + pleasure_delta),
+        "arousal": clamp01(arousal + arousal_delta),
+        "dominance": clamp01(dominance + (dominance_delta * factors["dominance_resistance"])),
+    }
+    return next_pad
+
+def _calculate_statement_collapse_stage(
+    prior_stage: int,
+    cumulative_pressure: float,
+    breakdown_probability: float,
+    cumulative_contradictions_count: int,
+    current_hard_contradictions_count: int,
+    soft_dialogue_contradiction: bool,
+    pad_state: Dict[str, float],
+    case_data: Optional[Dict[str, Any]],
+) -> int:
+    personality = _case_personality(case_data)
+    factors = _calculate_personality_response_factors(case_data, "Neutral")
+    collapse_signal = (
+        (cumulative_pressure * 4.8)
+        + (breakdown_probability * 1.8)
+        + (0.45 * float(cumulative_contradictions_count))
+        + (0.75 * float(current_hard_contradictions_count))
+        + (0.25 if soft_dialogue_contradiction else 0.0)
+        + (max(0.0, pad_state.get("arousal", 0.5) - 0.55) * 1.8)
+        + (max(0.0, 0.45 - pad_state.get("dominance", 0.5)) * 1.6)
+        + (max(0.0, 0.45 - pad_state.get("pleasure", 0.5)) * 1.2)
+        + (personality["neuroticism"] * 0.3)
+        + (personality["agreeableness"] * 0.1)
+        - (0.75 * factors["collapse_resistance"])
+    )
+
+    if breakdown_probability >= BREAKDOWN_EXPOSURE_THRESHOLD:
+        stage = 5
+    elif collapse_signal >= 4.5:
+        stage = 4
+    elif collapse_signal >= 3.4:
+        stage = 3
+    elif collapse_signal >= 2.2:
+        stage = 2
+    elif collapse_signal >= 1.1:
+        stage = 1
+    else:
+        stage = 0
+
+    return max(max(0, min(5, int(prior_stage))), stage)
+
+def _generate_final_psychological_reaction(
+    case_data: Optional[Dict[str, Any]],
+    statement_collapse_stage: int,
+    pad_state: Dict[str, float],
+    core_fact_exposed: bool,
+) -> str:
+    suspect_profile = case_data.get("suspect_profile", {}) if isinstance(case_data, dict) else {}
+    role = norm(suspect_profile.get("case_role", "용의자")) or "용의자"
+    personality = _case_personality(case_data)
+    neuroticism = personality["neuroticism"]
+    conscientiousness = personality["conscientiousness"]
+    agreeableness = personality["agreeableness"]
+    arousal = pad_state.get("arousal", 0.5)
+    dominance = pad_state.get("dominance", 0.5)
+    pleasure = pad_state.get("pleasure", 0.5)
+
+    if core_fact_exposed or statement_collapse_stage >= 5:
+        if neuroticism >= 0.65:
+            return "용의자는 끝내 시선을 피한 채 호흡이 거칠어지고, 더는 기존 진술을 유지하지 못한 채 사실을 털어놓으려는 상태로 무너져 있다."
+        if agreeableness >= 0.6:
+            return "용의자는 더 버티기 어렵다는 듯 목소리를 낮추고, 일부가 아니라 핵심 사실까지 인정해야 한다는 표정을 보인다."
+        return "용의자는 표정이 굳은 채로도 이미 주도권을 잃었고, 핵심 사실을 숨기기보다 받아들이는 쪽으로 기울어 있다."
+    if statement_collapse_stage >= 4:
+        if dominance <= 0.35:
+            return "용의자는 질문을 정면으로 받지 못하고 답변 사이가 자주 끊기며, 기존 진술 구조가 거의 붕괴된 상태다."
+        return "용의자는 기존 진술을 유지하려 하지만 세부 설명을 이어가지 못하고 부분적으로 사실을 수정하려는 흔들림이 크다."
+    if statement_collapse_stage >= 3:
+        if conscientiousness >= 0.7:
+            return "용의자는 여전히 진술 틀을 붙잡고 있지만, 세부를 맞추려 할수록 앞선 설명과 어긋나는 모습이 드러난다."
+        return "용의자는 이전보다 말을 고르는 시간이 길어지고, 일부 표현을 정정하며 방어선이 눈에 띄게 얇아진다."
+    if statement_collapse_stage >= 2:
+        if arousal >= 0.65:
+            return "용의자는 표정과 호흡에서 긴장이 크게 올라와 있고, 사소한 질문에도 즉답 대신 망설임이 섞이기 시작했다."
+        return "용의자는 아직 부인 기조를 유지하지만, 질문이 깊어질수록 말끝이 흔들리고 설명이 짧아지고 있다."
+    if statement_collapse_stage >= 1:
+        if pleasure <= 0.35:
+            return "용의자는 겉으로는 차분하려 하지만 표정이 굳어 있고, 질문 의도를 경계하며 최소한의 말로 버티고 있다."
+        return f"이 {role}은 아직 큰 붕괴는 없지만, 방어적으로 진술을 반복하며 심문 흐름을 조심스럽게 살피고 있다."
+    return f"이 {role}은 현재까지는 진술 구조를 비교적 안정적으로 유지하고 있으며, 질문 주도권을 쉽게 넘기지 않으려 한다."
+
+def _normalize_documents(
+    raw_documents: Any,
+    overview: Dict[str, Any],
+    suspect: Dict[str, Any],
+) -> Dict[str, Any]:
+    documents = raw_documents if isinstance(raw_documents, dict) else {}
+    case_overview = documents.get("case_overview", {}) if isinstance(documents.get("case_overview"), dict) else {}
+    scene_report = documents.get("scene_report", {}) if isinstance(documents.get("scene_report"), dict) else {}
+    character_info = documents.get("character_info", {}) if isinstance(documents.get("character_info"), dict) else {}
+
+    return {
+        "case_overview": {
+            "incident_time": norm(case_overview.get("incident_time", "")) or norm(overview.get("time", "")),
+            "incident_place": norm(case_overview.get("incident_place", "")) or norm(overview.get("place", "")),
+            "incident_type": norm(case_overview.get("incident_type", "")) or norm(overview.get("type", "")),
+            "victim_status": norm(case_overview.get("victim_status", "")),
+            "summary": norm(case_overview.get("summary", "")),
+        },
+        "scene_report": {
+            "summary": norm(scene_report.get("summary", "")),
+            "bullet_points": _normalize_string_list(scene_report.get("bullet_points", [])),
+        },
+        "character_info": {
+            "suspect_summary": norm(character_info.get("suspect_summary", "")),
+            "victim_relation": norm(character_info.get("victim_relation", "")) or norm(suspect.get("relation", "")),
+            "conflict_points": _normalize_string_list(character_info.get("conflict_points", [])),
+        },
+        "reference_statements": _normalize_string_list(documents.get("reference_statements", [])),
+        "timeline": _normalize_string_list(documents.get("timeline", [])),
+        "detective_memo": _normalize_string_list(documents.get("detective_memo", [])),
+    }
+
 def coerce_case_payload(case_blob: Any, fallback_case_id: str = "") -> Optional[Dict[str, Any]]:
+    """
+    Normalize one case file into the server's runtime structure.
+
+    Important:
+    - documents / suspect_profile are retained for briefing, UI, and later extensions
+    - the existing interrogation engine still runs on truth_slots / evidences / contradictions
+    """
     if not isinstance(case_blob, dict):
         return None
 
     overview = case_blob.get("overview", {}) if isinstance(case_blob.get("overview"), dict) else {}
     suspect = case_blob.get("suspect", {}) if isinstance(case_blob.get("suspect"), dict) else {}
+    selection_card = case_blob.get("selection_card", {}) if isinstance(case_blob.get("selection_card"), dict) else {}
+    suspect_profile = case_blob.get("suspect_profile", {}) if isinstance(case_blob.get("suspect_profile"), dict) else {}
+    default_personality = suspect_profile.get("default_personality", {}) if isinstance(suspect_profile.get("default_personality"), dict) else {}
+    legacy_personality = suspect_profile.get("personality", {}) if isinstance(suspect_profile.get("personality"), dict) else {}
+    mental_state = suspect_profile.get("mental_state", {}) if isinstance(suspect_profile.get("mental_state"), dict) else {}
     truth_slots = case_blob.get("truth_slots", {}) if isinstance(case_blob.get("truth_slots"), dict) else {}
     evidences = case_blob.get("evidences", []) if isinstance(case_blob.get("evidences"), list) else []
     contradictions = case_blob.get("contradictions", []) if isinstance(case_blob.get("contradictions"), list) else []
@@ -2394,13 +3087,28 @@ def coerce_case_payload(case_blob: Any, fallback_case_id: str = "") -> Optional[
     if not case_id:
         return None
 
+    normalized_personality = _default_personality()
+    raw_default_personality = default_personality if default_personality else legacy_personality
+    for trait in BIG_FIVE_TRAITS:
+        normalized_personality[trait] = _to_clamped_float(raw_default_personality.get(trait, normalized_personality[trait]))
+
+    normalized_mental_state = _default_mental_state()
+    for field in PAD_STATE_FIELDS:
+        normalized_mental_state[field] = _to_clamped_float(mental_state.get(field, normalized_mental_state[field]))
+
     return {
         "case_id": case_id,
+        "selection_card": {
+            "title": norm(selection_card.get("title", "")),
+            "subtitle": norm(selection_card.get("subtitle", "")),
+            "brief": norm(selection_card.get("brief", "")),
+        },
         "overview": {
             "time": norm(overview.get("time", "")),
             "place": norm(overview.get("place", "")),
             "type": norm(overview.get("type", "")),
         },
+        "documents": _normalize_documents(case_blob.get("documents", {}), overview, suspect),
         "motive": norm(case_blob.get("motive", "")),
         "crime_flow": norm(case_blob.get("crime_flow", "")),
         "suspect": {
@@ -2409,145 +3117,62 @@ def coerce_case_payload(case_blob: Any, fallback_case_id: str = "") -> Optional[
             "job": norm(suspect.get("job", "")),
             "relation": norm(suspect.get("relation", "")),
         },
+        "suspect_profile": {
+            "case_role": norm(suspect_profile.get("case_role", "")),
+            "default_personality": normalized_personality,
+            "selected_personality": {},
+            "mental_state": normalized_mental_state,
+        },
         "false_statement": norm(case_blob.get("false_statement", "")),
         "truth_slots": normalized_truth_slots,
         "evidences": normalized_evidences,
         "contradictions": normalized_contradictions,
     }
 
-def _case_type_key(text: str) -> str:
-    return norm_for_match(text)
-
-def _is_fire_case_type(text: str) -> bool:
-    normalized = norm(text)
-    return any(marker in normalized for marker in FIRE_CASE_MARKERS)
-
-def _recent_case_type_keys() -> set:
-    return {_case_type_key(case_type) for case_type in RECENT_CASE_TYPE_HISTORY if case_type}
-
-def _pick_case_blueprint(excluded_labels: Optional[set] = None) -> Dict[str, Any]:
-    excluded_labels = excluded_labels or set()
-    recent_keys = _recent_case_type_keys()
-    eligible = [
-        blueprint
-        for blueprint in CASE_VARIANT_BLUEPRINTS
-        if blueprint["label"] not in excluded_labels
-        and _case_type_key(blueprint["type_hint"]) not in recent_keys
-    ]
-    if not eligible:
-        eligible = [
-            blueprint
-            for blueprint in CASE_VARIANT_BLUEPRINTS
-            if blueprint["label"] not in excluded_labels
-        ]
-    if not eligible:
-        eligible = CASE_VARIANT_BLUEPRINTS
-    return random.choice(eligible)
-
-def _register_generated_case_type(case_data: Dict[str, Any]) -> None:
-    overview = case_data.get("overview", {}) if isinstance(case_data, dict) else {}
-    case_type = norm(overview.get("type", "")) if isinstance(overview, dict) else ""
-    if case_type:
-        RECENT_CASE_TYPE_HISTORY.append(case_type)
-
-def llm_generate_case() -> Dict[str, Any]:
-    """
-    Generate a structured interrogation case while actively varying crime type.
-    """
-    system = (
-        "You generate structured interrogation-game cases.\n"
-        "Output must be valid JSON matching the provided schema.\n"
-        "The example JSON is only a schema/style reference, not a crime-type template.\n"
-        "Vary the crime type, setting, suspect relationship, and motive across generations.\n"
-        "Do not keep generating arson or fire cases unless the target profile explicitly asks for one.\n"
-        "truth_slots must always be present and must contain short canonical comparison values.\n"
-        "truth_slots.met_victim_that_day must be either 'yes' or 'no'.\n"
-        "evidences must contain 4 to 5 items.\n"
-        "contradictions must contain 3 to 4 items.\n"
-        "Each contradiction must include slot, truth_value, and contradiction_type.\n"
-        "Each contradiction.related_evidence should reference at least one evidence id when possible.\n"
-        "Each contradiction.slot should match the main truth slot being challenged.\n"
-        "Each contradiction.truth_value should be the actual value the server can compare against.\n"
-        "Use contradiction_type values such as claim_vs_evidence, claim_vs_truth, timeline_mismatch, or alibi_mismatch.\n"
-        "Each evidence item must include an aliases array. It may be empty, or contain 1 to 4 short natural user-facing reference phrases such as CCTV aliases, camera aliases, or place-specific evidence nicknames.\n"
-        "Include at least one contradiction tied to the suspect's alibi or claimed whereabouts.\n"
-        "false_statement should sound plausible at first but collapse under evidence or contradiction pressure.\n"
-        "crime_flow is the hidden ground truth summary.\n"
-        "case_id must start with 'case_'.\n"
-    )
-
-    example_block = (
-        f"\n[Example case JSON]\n{EXAMPLE_CASE_TEXT}\n"
-        if EXAMPLE_CASE_TEXT else
-        "\n[Example case JSON]\n(No example file available.)\n"
-    )
-    recent_types = list(RECENT_CASE_TYPE_HISTORY)
-    tried_labels = set()
-    last_case_data: Optional[Dict[str, Any]] = None
-
-    for _attempt in range(3):
-        blueprint = _pick_case_blueprint(tried_labels)
-        tried_labels.add(blueprint["label"])
-        recent_types_text = ", ".join(recent_types) if recent_types else "(none)"
-        fire_rule = (
-            "Fire or arson is allowed for this run."
-            if blueprint["allow_fire"]
-            else "Do not generate a fire, arson, blaze, or burn case for this run."
-        )
-        user = (
-            "Create one new interrogation case.\n"
-            "Important: do not copy the example's wording, facts, or crime type.\n"
-            "Make the case meaningfully different from recent generations.\n"
-            f"\n[Target crime profile]\n- Crime type: {blueprint['type_hint']}\n"
-            f"- Recommended setting: {blueprint['place_hint']}\n"
-            f"- Recommended motive direction: {blueprint['motive_hint']}\n"
-            f"\n[Recent crime types to avoid repeating]\n- {recent_types_text}\n"
-            f"\n[Hard diversity rule]\n- {fire_rule}\n"
-            "- overview.type must clearly match the target crime profile.\n"
-            + example_block +
-            "\nNow output only the new case JSON.\n"
-        )
-
-        resp = client.responses.create(
-            model=LLM_MODEL,
-            input=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            text={
-                "format": {
-                    "type": "json_schema",
-                    "name": "interrogation_case",
-                    "strict": True,
-                    "schema": CASE_JSON_SCHEMA,
-                }
-            },
-            max_output_tokens=4000,
-            store=False,
-        )
-
-        text = (resp.output_text or "").strip()
-        case_data = coerce_case_payload(json.loads(text))
+def load_prebuilt_case_library() -> List[Dict[str, Any]]:
+    cases: List[Dict[str, Any]] = []
+    for path in sorted(PREBUILT_CASE_DIR.glob("*.json")):
+        case_blob = read_json_file(path, None)
+        case_data = coerce_case_payload(case_blob)
         if not case_data:
-            raise RuntimeError("Generated case payload could not be normalized")
-        last_case_data = case_data
-        generated_type = norm((case_data.get("overview", {}) or {}).get("type", ""))
-        generated_key = _case_type_key(generated_type)
+            continue
+        cases.append(case_data)
+    return cases
 
-        should_retry = False
-        if generated_key and generated_key in _recent_case_type_keys():
-            should_retry = True
-        if not blueprint["allow_fire"] and _is_fire_case_type(generated_type):
-            should_retry = True
+def pick_prebuilt_case_choices(num_choices: int = 3) -> List[Dict[str, Any]]:
+    library = load_prebuilt_case_library()
+    if not library:
+        return []
+    if len(library) <= num_choices:
+        shuffled = list(library)
+        random.shuffle(shuffled)
+        return shuffled
+    return random.sample(library, num_choices)
 
-        if not should_retry:
-            _register_generated_case_type(case_data)
-            return case_data
-
-    if last_case_data:
-        _register_generated_case_type(last_case_data)
-        return last_case_data
-    raise RuntimeError("Failed to generate case")
+def _public_case_briefing(case_data: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if not isinstance(case_data, dict):
+        return {}
+    suspect = case_data.get("suspect", {}) if isinstance(case_data.get("suspect"), dict) else {}
+    suspect_profile = case_data.get("suspect_profile", {}) if isinstance(case_data.get("suspect_profile"), dict) else {}
+    return {
+        "case_id": norm(case_data.get("case_id", "")),
+        "selection_card": case_data.get("selection_card", {}),
+        "overview": case_data.get("overview", {}),
+        "documents": case_data.get("documents", {}),
+        "suspect": {
+            "name": norm(suspect.get("name", "")),
+            "age": int(safe_float(suspect.get("age", 0), 0.0)),
+            "job": norm(suspect.get("job", "")),
+            "relation": norm(suspect.get("relation", "")),
+        },
+        "suspect_profile": {
+            "default_personality": _case_default_personality(case_data),
+            "selected_personality": _normalize_selected_personality_blob(
+                suspect_profile.get("selected_personality", {})
+            ),
+            "mental_state": _normalize_pad_state_blob(suspect_profile.get("mental_state", {})),
+        },
+    }
 
 
 # =========================================================
@@ -2678,7 +3303,7 @@ def _build_turn_pressure_context_v2(
         )
     if pressure_level == "high":
         directives.append(
-            "- Let the story wobble a little. You may partially correct yourself, but do not fully confess."
+            "- Let the story wobble a little. You may partially correct yourself, but do not reveal every core fact at once."
         )
     if target_slot:
         directives.append(
@@ -2714,21 +3339,21 @@ def _build_suspect_answer_system_prompt() -> str:
         "If pressure is strong, let your story shake slightly and reveal only one small concrete fact.\n"
         "Do not mention evidence the detective has not brought up yet.\n"
         "Do not volunteer hidden truth-slot information unless the detective directly asks about that specific point.\n"
-        "Do not fully confess unless the confession trigger is reached.\n"
+        "Do not jump straight to a full confession. If pressure peaks, reveal only the minimum core fact that leaks through.\n"
         "If this is the first turn, do not imply that you already explained it before.\n"
         "Do not say phrases like '말씀드렸습니다', '아까 말했다', '전에 말했다', or '이미 말했듯이' unless such dialogue actually exists in history.\n"
         "When history is empty, answer as if this is the first time you are responding.\n"
     )
 
-def _build_confession_system_prompt() -> str:
+def _build_core_fact_exposure_system_prompt() -> str:
     return (
-        "You are a suspect finally breaking under interrogation.\n"
+        "You are a suspect whose statement structure has collapsed under interrogation.\n"
         "Reply in natural spoken Korean using polite speech (존댓말).\n"
         "Use 1 or 2 short sentences, at most 3.\n"
         "Never use banmal.\n"
         "Do not sound theatrical, poetic, or robotic.\n"
-        "Confess the crime directly instead of circling around it.\n"
-        "You may include guilt, fear, regret, or resignation, but keep it grounded.\n"
+        "Expose one or two core facts directly instead of giving a dramatic full confession.\n"
+        "You may sound shaken, resigned, or defensive, but keep it grounded and factual.\n"
     )
 
 def llm_suspect_answer(
@@ -2736,9 +3361,11 @@ def llm_suspect_answer(
     case_data: Optional[Dict[str, Any]],
     history: List[Dict[str, Any]],
     user_text: str,
-    confession_probability: float,
+    breakdown_probability: float,
     interrogation_signal: Optional[Dict[str, Any]] = None,
     behavior_state: str = DEFAULT_FSM_STATE,
+    statement_collapse_stage: int = 0,
+    pad_state: Optional[Dict[str, float]] = None,
 ) -> str:
     system = _build_suspect_answer_system_prompt()
     recent = history[-4:] if isinstance(history, list) else []
@@ -2762,6 +3389,13 @@ def llm_suspect_answer(
     turn_pressure_context = _build_turn_pressure_context_v2(case_data, interrogation_signal)
     pressure_level = str((interrogation_signal or {}).get("pressure_level", "none")).strip().lower()
     has_current_contradiction = str((interrogation_signal or {}).get("intent", "")).strip().lower() == "point_contradiction"
+    current_pad_state = _normalize_pad_state_blob(pad_state or {})
+    collapse_label = _statement_collapse_label(statement_collapse_stage)
+    reply_personality_factors = _calculate_personality_response_factors(
+        case_data,
+        _infer_player_intent(interrogation_signal),
+    )
+    reply_length_bias = reply_personality_factors.get("reply_length_bias", 1.0)
 
     extra_guard = ""
     if turn_pressure_context:
@@ -2776,6 +3410,18 @@ def llm_suspect_answer(
         extra_guard += "\n- Sound colder and more resistant. You may push back and cooperate less."
     elif behavior_state == "Pressured / Shaken":
         extra_guard += "\n- Let slight hesitation or a small wobble show in the wording."
+    if reply_length_bias <= 0.92:
+        extra_guard += "\n- Keep the reply especially short and compact."
+    elif reply_length_bias >= 1.10:
+        extra_guard += "\n- You may use slightly fuller wording, but stay within 2 short sentences."
+    if statement_collapse_stage >= 4:
+        extra_guard += "\n- The statement structure is close to collapsing. Let short corrections and unstable wording appear naturally."
+    elif statement_collapse_stage >= 3:
+        extra_guard += "\n- You are partly revising your story. Small corrections are allowed, but avoid revealing everything at once."
+    elif statement_collapse_stage >= 2:
+        extra_guard += "\n- Keep the denial, but add visible hesitation or caution."
+    elif statement_collapse_stage <= 1:
+        extra_guard += "\n- Maintain a relatively stable denial structure."
     extra_guard += "\n- Answer only the detective's latest question or accusation."
     extra_guard += "\n- Put the direct answer in the first sentence."
     extra_guard += "\n- If the detective quotes a line or message, explain that exact line first."
@@ -2792,7 +3438,13 @@ def llm_suspect_answer(
     user = (
         case_context
         + f"\n[Current behavioral state] {behavior_state}\n"
-        + f"\n[Current confession probability reference] {confession_probability:.2f}\n"
+        + f"[Current statement collapse stage] {statement_collapse_stage} ({collapse_label})\n"
+        + (
+            f"[Current PAD state] pleasure:{current_pad_state['pleasure']:.2f} "
+            f"arousal:{current_pad_state['arousal']:.2f} "
+            f"dominance:{current_pad_state['dominance']:.2f}\n"
+        )
+        + f"\n[Current breakdown probability reference] {breakdown_probability:.2f}\n"
         + "[Recent dialogue]\n"
         + ("\n".join(hist_lines) if hist_lines else "(none)")
         + f"\n[Latest detective question]\n{user_text}\n"
@@ -2802,13 +3454,17 @@ def llm_suspect_answer(
     )
 
     def _generate_suspect_reply(prompt_text: str, max_output_tokens: int = 220) -> str:
+        adjusted_tokens = max(
+            140,
+            min(260, int(round(max_output_tokens * max(0.85, min(1.15, reply_length_bias))))),
+        )
         resp = client.responses.create(
             model=LLM_MODEL,
             input=[
                 {"role": "system", "content": system},
                 {"role": "user", "content": prompt_text},
             ],
-            max_output_tokens=max_output_tokens,
+            max_output_tokens=adjusted_tokens,
         )
         return trim_to_1_3_sentences((resp.output_text or "").strip())
 
@@ -3099,7 +3755,7 @@ def detect_dialogue_contradiction_local(
         "reason": "no local contradiction detected",
     }
 
-def llm_confession(case_context: str, history: List[Dict[str, Any]], user_text: str) -> str:
+def llm_core_fact_exposure(case_context: str, history: List[Dict[str, Any]], user_text: str) -> str:
 
     recent = history[-4:] if isinstance(history, list) else []
     hist_lines = []
@@ -3123,12 +3779,53 @@ def llm_confession(case_context: str, history: List[Dict[str, Any]], user_text: 
     resp = client.responses.create(
         model=LLM_MODEL,
         input=[
-            {"role": "system", "content": _build_confession_system_prompt()},
+            {"role": "system", "content": _build_core_fact_exposure_system_prompt()},
             {"role": "user", "content": user},
         ],
         max_output_tokens=200,
     )
     return trim_to_1_3_sentences((resp.output_text or "").strip()) or "…제가 했습니다. 더는 숨길 수 없어요."
+
+def _resolve_case_from_request(
+    case_id: str,
+    case_json: str = "",
+) -> Tuple[str, Optional[Dict[str, Any]], Optional[Dict[str, Any]], int]:
+    resolved_case_id = norm(case_id)
+    raw_case_json = case_json or ""
+    if not resolved_case_id and not raw_case_json.strip():
+        return "", None, {"error": "missing_case_context"}, 400
+
+    case_data = None
+    client_case_payload = safe_json_loads(raw_case_json, None) if raw_case_json.strip() else None
+    client_case_data = coerce_case_payload(client_case_payload, resolved_case_id)
+    if client_case_data:
+        payload_case_id = norm(client_case_data.get("case_id", ""))
+        if resolved_case_id and payload_case_id != resolved_case_id:
+            return resolved_case_id, None, {
+                "error": "case_id_mismatch",
+                "message": "case_id and case_json.case_id do not match.",
+                "case_id": resolved_case_id,
+                "case_json_case_id": payload_case_id,
+            }, 400
+        resolved_case_id = payload_case_id
+        case_data = client_case_data
+        CASE_CACHE[resolved_case_id] = case_data
+        persist_case(case_data)
+    elif resolved_case_id:
+        case_data = load_case(resolved_case_id)
+
+    if resolved_case_id and not case_data:
+        return resolved_case_id, None, {
+            "error": "case_not_found",
+            "message": "Unknown case_id.",
+            "case_id": resolved_case_id,
+        }, 404
+    if not case_data:
+        return resolved_case_id, None, {
+            "error": "invalid_case_context",
+            "message": "Provide a valid case_id or case_json for interrogation.",
+        }, 400
+    return resolved_case_id, case_data, None, 200
 
 # =========================================================
 # ENDPOINTS
@@ -3136,26 +3833,249 @@ def llm_confession(case_context: str, history: List[Dict[str, Any]], user_text: 
 @app.post("/case/generate")
 async def case_generate():
     """
-    seed 없이 자동 사건 생성:
-    - 예시 JSON을 프롬프트에 넣어서 구조/톤을 맞춘다
-    - case_id는 서버에서 고유하게 강제
+    Prebuilt case selection endpoint.
+
+    This no longer generates a new case with the LLM.
+    It returns 3 prebuilt case files and keeps "case" alongside "cases"
+    for backwards compatibility with older clients.
+
+    The interrogation engine used by /interrogation/qna is unchanged.
     """
     try:
-        case_data = llm_generate_case()
+        case_choices = pick_prebuilt_case_choices(3)
+        if not case_choices:
+            raise RuntimeError("No prebuilt cases found in cases/prebuilt")
 
-        # case_id 고유 강제 (중복 방지)
-        cid = (case_data.get("case_id", "") or "").strip()
-        if not cid or cid in CASE_CACHE or case_store_path(cid).exists():
-            cid = f"case_{uuid.uuid4().hex[:8]}"
-            case_data["case_id"] = cid
+        for case_data in case_choices:
+            cid = norm(case_data.get("case_id", ""))
+            if not cid:
+                continue
+            CASE_CACHE[cid] = case_data
+            persist_case(case_data)
 
-        CASE_CACHE[cid] = case_data
-        persist_case(case_data)
-        return JSONResponse(status_code=200, content={"case": case_data})
+        primary_case = case_choices[0]
+        public_case_choices = [_public_case_briefing(case_data) for case_data in case_choices]
+        return JSONResponse(
+            status_code=200,
+            content={
+                "source": "prebuilt",
+                "cases": case_choices,
+                "case": primary_case,
+                "briefing_cases": public_case_choices,
+                "briefing_case": public_case_choices[0] if public_case_choices else {},
+            },
+        )
 
     except Exception as e:
         tb = traceback.format_exc()
         return JSONResponse(status_code=500, content={"error": str(e), "traceback": tb[-2000:]})
+
+@app.post("/interrogation/setup")
+async def interrogation_setup(
+    case_id: str = Form(""),
+    case_json: str = Form(""),
+    personality_json: str = Form(""),
+    reset_progress: str = Form(""),
+):
+    try:
+        resolved_case_id, case_data, error_content, status_code = _resolve_case_from_request(case_id, case_json)
+        if error_content:
+            return JSONResponse(status_code=status_code, content=error_content)
+
+        if resolved_case_id and is_truthy_string(reset_progress):
+            INTERROGATION_PROGRESS_CACHE.pop(resolved_case_id, None)
+
+        progress_state = _get_progress_state(resolved_case_id)
+        if not personality_json.strip():
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": "missing_selected_personality",
+                    "message": "Select NPC personality before starting interrogation.",
+                },
+            )
+        personality_payload = safe_json_loads(personality_json, None)
+        if not isinstance(personality_payload, dict):
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": "invalid_selected_personality",
+                    "message": "personality_json must be a JSON object with all five Big Five values.",
+                },
+            )
+        selected_personality, missing_traits = _validate_selected_personality_payload(
+            personality_payload
+        )
+        if missing_traits:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": "invalid_selected_personality",
+                    "message": "personality_json must include all five Big Five values.",
+                    "missing_traits": missing_traits,
+                },
+            )
+        effective_case = _effective_case_from_progress(
+            case_data,
+            progress_state,
+            selected_personality,
+        )
+        progress_snapshot = dict(progress_state)
+        progress_snapshot["selected_personality"] = selected_personality
+        progress_snapshot["final_psychological_report"] = _build_final_psychological_report(
+            effective_case,
+            progress_snapshot,
+        )
+        stored_progress = _persist_progress_snapshot(resolved_case_id, progress_snapshot)
+        return JSONResponse(
+            status_code=200,
+            content={
+                "case_id": resolved_case_id,
+                "default_personality": _case_default_personality(case_data),
+                "selected_personality": selected_personality,
+                "baseline_pad_state": _case_baseline_pad_state(effective_case),
+                "statement_collapse_stage": int(stored_progress.get("statement_collapse_stage", 0)),
+                "turn_count": int(stored_progress.get("turn_count", 0)),
+                "final_psychological_report": stored_progress.get("final_psychological_report", {}),
+            },
+        )
+    except Exception as e:
+        tb = traceback.format_exc()
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(e), "traceback": tb[-2000:]},
+        )
+
+@app.post("/interrogation/judgment/submit")
+async def interrogation_judgment_submit(
+    case_id: str = Form(""),
+    case_json: str = Form(""),
+    judgment: str = Form(""),
+    notes: str = Form(""),
+):
+    try:
+        resolved_case_id, case_data, error_content, status_code = _resolve_case_from_request(case_id, case_json)
+        if error_content:
+            return JSONResponse(status_code=status_code, content=error_content)
+
+        choice_key = _normalize_judgment_choice(judgment)
+        if not choice_key:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": "invalid_judgment",
+                    "allowed": JUDGMENT_CHOICE_LABELS,
+                },
+            )
+
+        progress_state = _get_progress_state(resolved_case_id)
+        effective_case = _effective_case_from_progress(case_data, progress_state)
+        submitted_judgment = _normalize_submitted_judgment(
+            {
+                "choice_key": choice_key,
+                "notes": notes,
+                "turn_count": progress_state.get("turn_count", 0),
+            }
+        )
+        progress_snapshot = dict(progress_state)
+        progress_snapshot["submitted_judgment"] = submitted_judgment
+        progress_snapshot["final_psychological_report"] = _build_final_psychological_report(
+            effective_case,
+            progress_snapshot,
+        )
+        stored_progress = _persist_progress_snapshot(resolved_case_id, progress_snapshot)
+        return JSONResponse(
+            status_code=200,
+            content={
+                "case_id": resolved_case_id,
+                "submitted_judgment": stored_progress.get("submitted_judgment", {}),
+                "result_available": True,
+                "final_psychological_report": stored_progress.get("final_psychological_report", {}),
+            },
+        )
+    except Exception as e:
+        tb = traceback.format_exc()
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(e), "traceback": tb[-2000:]},
+        )
+
+@app.post("/interrogation/report")
+async def interrogation_report(
+    case_id: str = Form(""),
+    case_json: str = Form(""),
+):
+    try:
+        resolved_case_id, case_data, error_content, status_code = _resolve_case_from_request(case_id, case_json)
+        if error_content:
+            return JSONResponse(status_code=status_code, content=error_content)
+
+        progress_state = _get_progress_state(resolved_case_id)
+        effective_case = _effective_case_from_progress(case_data, progress_state)
+        final_report = _build_final_psychological_report(effective_case, progress_state)
+        progress_snapshot = dict(progress_state)
+        progress_snapshot["final_psychological_report"] = final_report
+        stored_progress = _persist_progress_snapshot(resolved_case_id, progress_snapshot)
+        return JSONResponse(
+            status_code=200,
+            content={
+                "case_id": resolved_case_id,
+                "final_psychological_report": final_report,
+                "statement_records": stored_progress.get("statement_records", []),
+                "submitted_judgment": stored_progress.get("submitted_judgment", {}),
+            },
+        )
+    except Exception as e:
+        tb = traceback.format_exc()
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(e), "traceback": tb[-2000:]},
+        )
+
+@app.post("/interrogation/result/reveal")
+async def interrogation_result_reveal(
+    case_id: str = Form(""),
+    case_json: str = Form(""),
+):
+    try:
+        resolved_case_id, case_data, error_content, status_code = _resolve_case_from_request(case_id, case_json)
+        if error_content:
+            return JSONResponse(status_code=status_code, content=error_content)
+
+        progress_state = _get_progress_state(resolved_case_id)
+        effective_case = _effective_case_from_progress(case_data, progress_state)
+        final_report = _build_final_psychological_report(effective_case, progress_state)
+        actual_choice_key = _case_result_choice_key(effective_case)
+        submitted_judgment = _normalize_submitted_judgment(progress_state.get("submitted_judgment", {}))
+        judgment_matches = bool(
+            submitted_judgment.get("choice_key")
+            and submitted_judgment.get("choice_key") == actual_choice_key
+        )
+        progress_snapshot = dict(progress_state)
+        progress_snapshot["final_psychological_report"] = final_report
+        stored_progress = _persist_progress_snapshot(resolved_case_id, progress_snapshot)
+        return JSONResponse(
+            status_code=200,
+            content={
+                "case_id": resolved_case_id,
+                "actual_result": {
+                    "choice_key": actual_choice_key,
+                    "choice_label": JUDGMENT_CHOICE_LABELS.get(actual_choice_key, ""),
+                    "case_role": norm(((effective_case or {}).get("suspect_profile", {}) or {}).get("case_role", "")),
+                    "crime_flow_summary": norm((effective_case or {}).get("crime_flow", "")),
+                },
+                "submitted_judgment": submitted_judgment,
+                "judgment_matches": judgment_matches,
+                "final_psychological_report": final_report,
+                "statement_records": stored_progress.get("statement_records", []),
+            },
+        )
+    except Exception as e:
+        tb = traceback.format_exc()
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(e), "traceback": tb[-2000:]},
+        )
 
 @app.post("/interrogation/debug_confess")
 async def interrogation_debug_confess(
@@ -3227,23 +4147,88 @@ async def interrogation_debug_confess(
         if not final_user_text:
             final_user_text = "더는 숨길 수 없으니 사실대로 전부 인정하세요."
 
-        case_context = build_case_context(case_data, include_hidden_truth=True)
+        prior_progress = _get_progress_state(case_id)
+        effective_case_data = _effective_case_from_progress(case_data, prior_progress)
+        case_context = build_case_context(effective_case_data, include_hidden_truth=True)
         suspect_text = trim_to_1_3_sentences(
-            llm_confession(case_context, history, final_user_text)
+            llm_core_fact_exposure(case_context, history, final_user_text)
         )
         wav_b64 = await tts_to_b64(suspect_text)
+        debug_pad_state = {
+            "pleasure": 0.08,
+            "arousal": 0.94,
+            "dominance": 0.12,
+        }
+        final_psychological_reaction = _generate_final_psychological_reaction(
+            effective_case_data,
+            5,
+            debug_pad_state,
+            True,
+        )
+        statement_records = _normalize_statement_records(prior_progress.get("statement_records", []))
+        statement_records.append(
+            _build_statement_record(
+                MAX_GAME_TURNS,
+                final_user_text,
+                {"intent": "point_contradiction", "target_slot": "", "pressure_level": "high"},
+                suspect_text,
+                {
+                    "claimed_value": "",
+                    "hard_contradiction_ids": [],
+                    "soft_dialogue_contradiction": True,
+                },
+                {
+                    "statement_collapse_stage": 5,
+                    "pad_state": debug_pad_state,
+                    "fsm_state": EXPOSURE_FSM_STATE,
+                    "breakdown_probability": 1.0,
+                    "core_fact_exposed": True,
+                },
+            )
+        )
+        debug_progress_snapshot = {
+            "breakdown_probability": 1.0,
+            "referenced_evidence_ids": prior_progress.get("referenced_evidence_ids", []),
+            "established_contradiction_ids": prior_progress.get("established_contradiction_ids", []),
+            "stress_score": 1.0,
+            "cooperation_score": 0.0,
+            "cumulative_pressure": 1.0,
+            "fsm_state": EXPOSURE_FSM_STATE,
+            "last_raw_odds": 8.0,
+            "last_sue_impact": 3.0,
+            "statement_collapse_stage": 5,
+            "core_fact_exposed": True,
+            "pad_state": debug_pad_state,
+            "final_psychological_reaction": final_psychological_reaction,
+            "selected_personality": prior_progress.get("selected_personality", {}),
+            "statement_records": statement_records[-MAX_STATEMENT_RECORDS:],
+            "submitted_judgment": prior_progress.get("submitted_judgment", {}),
+            "turn_count": MAX_GAME_TURNS,
+        }
+        final_psychological_report = _build_final_psychological_report(
+            effective_case_data,
+            debug_progress_snapshot,
+        )
         if case_id:
             _store_progress_state(
                 case_id,
                 1.0,
-                [],
-                [],
+                prior_progress.get("referenced_evidence_ids", []),
+                prior_progress.get("established_contradiction_ids", []),
                 1.0,
                 0.0,
-                "Confession / Breakdown",
+                1.0,
+                EXPOSURE_FSM_STATE,
                 8.0,
                 3.0,
                 MAX_GAME_TURNS,
+                5,
+                debug_pad_state,
+                final_psychological_reaction,
+                prior_progress.get("selected_personality", {}),
+                statement_records[-MAX_STATEMENT_RECORDS:],
+                prior_progress.get("submitted_judgment", {}),
+                final_psychological_report,
             )
         return JSONResponse(
             status_code=200,
@@ -3251,14 +4236,21 @@ async def interrogation_debug_confess(
                 "user_text": final_user_text,
                 "suspect_text": suspect_text,
                 "pressure_delta": 0.0,
-                "confession_probability": 1.0,
-                "confession_triggered": True,
-                "fsm_state": "Confession / Breakdown",
+                "breakdown_probability": 1.0,
+                "core_fact_exposed": True,
+                "fsm_state": EXPOSURE_FSM_STATE,
                 "stress_score": 1.0,
+                "cumulative_pressure": 1.0,
                 "raw_odds": 8.0,
                 "latest_sue_impact": 3.0,
+                "statement_collapse_stage": 5,
+                "statement_collapse_label": _statement_collapse_label(5),
+                "pad_state": debug_pad_state,
+                "final_psychological_reaction": final_psychological_reaction,
+                "final_psychological_report": final_psychological_report,
+                "judgment_ready": True,
                 "turn_count": MAX_GAME_TURNS,
-                "debug_force_confession": True,
+                "debug_force_core_fact_exposure": True,
                 "audio_wav_b64": wav_b64,
             },
         )
@@ -3275,6 +4267,7 @@ async def interrogation_qna(
     user_text: str = Form(""),
     case_id: str = Form(""),
     case_json: str = Form(""),
+    personality_json: str = Form(""),
     history_json: str = Form("[]"),
     debug: str = Form(""),
     reset_progress: str = Form(""),
@@ -3290,8 +4283,8 @@ async def interrogation_qna(
       - user_text
       - suspect_text
       - pressure_delta
-      - confession_probability
-      - confession_triggered
+      - breakdown_probability
+      - core_fact_exposed
       - audio_wav_b64
     """
     try:
@@ -3362,16 +4355,91 @@ async def interrogation_qna(
             )
         if case_id and is_truthy_string(reset_progress):
             INTERROGATION_PROGRESS_CACHE.pop(case_id, None)
-        suspect_case_context = build_case_context(case_data, include_hidden_truth=False)
-        confession_case_context = build_case_context(case_data, include_hidden_truth=True)
         prior_progress = _get_progress_state(case_id)
-        prior_confession_probability = float(prior_progress["confession_probability"])
+        prior_breakdown_probability = float(
+            prior_progress.get("breakdown_probability", 0.0)
+        )
         prior_turn_count = max(0, int(prior_progress.get("turn_count", 0) or 0))
-        prior_confession_triggered = (
-            prior_confession_probability >= CONFESSION_TRIGGER_THRESHOLD
+        prior_cumulative_pressure = clamp01(
+            prior_progress.get("cumulative_pressure", 0.0)
+        )
+        prior_statement_collapse_stage = max(
+            0,
+            min(5, int(safe_float(prior_progress.get("statement_collapse_stage", 0), 0.0))),
+        )
+        prior_pad_state = _normalize_pad_state_blob(
+            prior_progress.get("pad_state", _case_baseline_pad_state(case_data))
+        )
+        prior_final_psychological_reaction = norm(
+            prior_progress.get("final_psychological_reaction", "")
+        )
+        prior_selected_personality = _selected_personality_from_progress(prior_progress)
+        prior_statement_records = _normalize_statement_records(
+            prior_progress.get("statement_records", [])
+        )
+        prior_submitted_judgment = _normalize_submitted_judgment(
+            prior_progress.get("submitted_judgment", {})
+        )
+        prior_final_psychological_report = _normalize_final_report_blob(
+            prior_progress.get("final_psychological_report", {})
+        )
+        client_personality_payload = safe_json_loads(personality_json, None) if personality_json.strip() else None
+        if personality_json.strip() and not isinstance(client_personality_payload, dict):
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": "invalid_selected_personality",
+                    "message": "personality_json must be a JSON object with all five Big Five values.",
+                },
+            )
+        validated_selected_personality: Dict[str, float] = {}
+        if isinstance(client_personality_payload, dict):
+            validated_selected_personality, missing_traits = _validate_selected_personality_payload(
+                client_personality_payload
+            )
+            if missing_traits:
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "error": "invalid_selected_personality",
+                        "message": "personality_json must include all five Big Five values.",
+                        "missing_traits": missing_traits,
+                    },
+                )
+        active_selected_personality = (
+            _resolve_selected_personality(
+                case_data,
+                prior_progress,
+                validated_selected_personality,
+            )
+            if isinstance(client_personality_payload, dict)
+            else prior_selected_personality
+        )
+        if not active_selected_personality:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": "missing_selected_personality",
+                    "message": "Select NPC personality before starting interrogation. Send personality_json to /interrogation/setup or include it in /interrogation/qna.",
+                },
+            )
+        effective_case_data = _effective_case_from_progress(
+            case_data,
+            prior_progress,
+            active_selected_personality,
+        )
+        suspect_case_context = build_case_context(effective_case_data, include_hidden_truth=False)
+        exposure_case_context = build_case_context(effective_case_data, include_hidden_truth=True)
+        prior_pad_state = _normalize_pad_state_blob(
+            prior_progress.get("pad_state", _case_baseline_pad_state(effective_case_data))
+        )
+        prior_core_fact_exposed = bool(
+            prior_progress.get("core_fact_exposed", False)
+            or prior_statement_collapse_stage >= 5
+            or prior_breakdown_probability >= BREAKDOWN_EXPOSURE_THRESHOLD
         )
 
-        if prior_confession_triggered:
+        if prior_core_fact_exposed:
             msg = "이미 피의자가 자백했습니다. 이번 심문은 종료됐습니다."
             return JSONResponse(
                 status_code=200,
@@ -3379,12 +4447,19 @@ async def interrogation_qna(
                     "user_text": final_user_text,
                     "suspect_text": msg,
                     "pressure_delta": 0.0,
-                    "confession_probability": prior_confession_probability,
-                    "confession_triggered": True,
-                    "fsm_state": "Confession / Breakdown",
+                    "breakdown_probability": prior_breakdown_probability,
+                    "core_fact_exposed": True,
+                    "fsm_state": EXPOSURE_FSM_STATE,
                     "stress_score": float(prior_progress.get("stress_score", 0.0)),
+                    "cumulative_pressure": prior_cumulative_pressure,
                     "raw_odds": float(prior_progress.get("last_raw_odds", 0.0)),
                     "latest_sue_impact": float(prior_progress.get("last_sue_impact", 0.0)),
+                    "statement_collapse_stage": prior_statement_collapse_stage,
+                    "statement_collapse_label": _statement_collapse_label(prior_statement_collapse_stage),
+                    "pad_state": prior_pad_state,
+                    "final_psychological_reaction": prior_final_psychological_reaction,
+                    "final_psychological_report": prior_final_psychological_report,
+                    "judgment_ready": True,
                     "turn_count": prior_turn_count,
                     "audio_wav_b64": await tts_to_b64(msg),
                 },
@@ -3398,12 +4473,19 @@ async def interrogation_qna(
                     "user_text": final_user_text,
                     "suspect_text": msg,
                     "pressure_delta": 0.0,
-                    "confession_probability": prior_confession_probability,
-                    "confession_triggered": bool(prior_confession_triggered),
+                    "breakdown_probability": prior_breakdown_probability,
+                    "core_fact_exposed": bool(prior_core_fact_exposed),
                     "fsm_state": norm(prior_progress.get("fsm_state", DEFAULT_FSM_STATE)) or DEFAULT_FSM_STATE,
                     "stress_score": float(prior_progress.get("stress_score", 0.0)),
+                    "cumulative_pressure": prior_cumulative_pressure,
                     "raw_odds": float(prior_progress.get("last_raw_odds", 0.0)),
                     "latest_sue_impact": float(prior_progress.get("last_sue_impact", 0.0)),
+                    "statement_collapse_stage": prior_statement_collapse_stage,
+                    "statement_collapse_label": _statement_collapse_label(prior_statement_collapse_stage),
+                    "pad_state": prior_pad_state,
+                    "final_psychological_reaction": prior_final_psychological_reaction,
+                    "final_psychological_report": prior_final_psychological_report,
+                    "judgment_ready": True,
                     "turn_count": prior_turn_count,
                     "audio_wav_b64": await tts_to_b64(msg),
                 },
@@ -3417,12 +4499,19 @@ async def interrogation_qna(
                     "user_text": "",
                     "suspect_text": msg,
                     "pressure_delta": 0.0,
-                    "confession_probability": prior_confession_probability,
-                    "confession_triggered": bool(prior_confession_triggered),
+                    "breakdown_probability": prior_breakdown_probability,
+                    "core_fact_exposed": bool(prior_core_fact_exposed),
                     "fsm_state": norm(prior_progress.get("fsm_state", DEFAULT_FSM_STATE)) or DEFAULT_FSM_STATE,
                     "stress_score": float(prior_progress.get("stress_score", 0.0)),
+                    "cumulative_pressure": prior_cumulative_pressure,
                     "raw_odds": float(prior_progress.get("last_raw_odds", 0.0)),
                     "latest_sue_impact": float(prior_progress.get("last_sue_impact", 0.0)),
+                    "statement_collapse_stage": prior_statement_collapse_stage,
+                    "statement_collapse_label": _statement_collapse_label(prior_statement_collapse_stage),
+                    "pad_state": prior_pad_state,
+                    "final_psychological_reaction": prior_final_psychological_reaction,
+                    "final_psychological_report": prior_final_psychological_report,
+                    "judgment_ready": False,
                     "turn_count": prior_turn_count,
                     "audio_wav_b64": await tts_to_b64(msg),
                 },
@@ -3436,12 +4525,19 @@ async def interrogation_qna(
                     "user_text": final_user_text,
                     "suspect_text": msg,
                     "pressure_delta": 0.0,
-                    "confession_probability": prior_confession_probability,
-                    "confession_triggered": bool(prior_confession_triggered),
+                    "breakdown_probability": prior_breakdown_probability,
+                    "core_fact_exposed": bool(prior_core_fact_exposed),
                     "fsm_state": norm(prior_progress.get("fsm_state", DEFAULT_FSM_STATE)) or DEFAULT_FSM_STATE,
                     "stress_score": float(prior_progress.get("stress_score", 0.0)),
+                    "cumulative_pressure": prior_cumulative_pressure,
                     "raw_odds": float(prior_progress.get("last_raw_odds", 0.0)),
                     "latest_sue_impact": float(prior_progress.get("last_sue_impact", 0.0)),
+                    "statement_collapse_stage": prior_statement_collapse_stage,
+                    "statement_collapse_label": _statement_collapse_label(prior_statement_collapse_stage),
+                    "pad_state": prior_pad_state,
+                    "final_psychological_reaction": prior_final_psychological_reaction,
+                    "final_psychological_report": prior_final_psychological_report,
+                    "judgment_ready": False,
                     "turn_count": prior_turn_count,
                     "audio_wav_b64": await tts_to_b64(msg),
                 },
@@ -3449,36 +4545,42 @@ async def interrogation_qna(
 
         # 2) case load (cache 우선)
         # 3) calc pressure/prob
-        question_analysis = llm_evaluate_interrogation(case_data, history, final_user_text)
-        confession_triggered = (
-            prior_confession_probability >= CONFESSION_TRIGGER_THRESHOLD
+        question_analysis = llm_evaluate_interrogation(effective_case_data, history, final_user_text)
+        repeated_question = detect_repeat(history, final_user_text)
+        question_category = _classify_question_category(
+            final_user_text,
+            question_analysis,
+            repeated_question,
         )
+        core_fact_exposed = bool(prior_core_fact_exposed)
         current_behavior_state = norm(prior_progress.get("fsm_state", DEFAULT_FSM_STATE)) or DEFAULT_FSM_STATE
 
         # 4) LLM answer
-        if confession_triggered:
-            suspect_text = llm_confession(confession_case_context, history, final_user_text)
+        if core_fact_exposed:
+            suspect_text = llm_core_fact_exposure(exposure_case_context, history, final_user_text)
         else:
             suspect_text = llm_suspect_answer(
                 suspect_case_context,
-                case_data,
+                effective_case_data,
                 history,
                 final_user_text,
-                prior_confession_probability,
+                prior_breakdown_probability,
                 question_analysis,
                 current_behavior_state,
+                prior_statement_collapse_stage,
+                prior_pad_state,
             )
 
         suspect_text = trim_to_1_3_sentences(suspect_text)
         rule_based_turn = analyze_interrogation_turn_rule_based(
-            case_data,
+            effective_case_data,
             history,
             final_user_text,
             suspect_text,
             question_analysis,
         )
         dialogue_contradiction_signal = _empty_dialogue_contradiction_signal("not evaluated")
-        if not confession_triggered:
+        if not core_fact_exposed:
             dialogue_contradiction_signal = detect_dialogue_contradiction_local(
                 history,
                 final_user_text,
@@ -3490,7 +4592,7 @@ async def interrogation_qna(
         ) and str(dialogue_contradiction_signal.get("severity", "none")).strip().lower() != "none"
         rule_based_turn["soft_dialogue_contradiction_signal"] = dialogue_contradiction_signal
         progress_eval = evaluate_interrogation_progress_v3(
-            case_data,
+            effective_case_data,
             history,
             final_user_text,
             question_analysis,
@@ -3498,54 +4600,137 @@ async def interrogation_qna(
             rule_based_turn["hard_contradiction_ids"],
             dialogue_contradiction_signal,
         )
-        if confession_triggered:
-            progress_eval["confession_probability"] = max(
-                float(progress_eval["confession_probability"]),
-                prior_confession_probability,
+        if core_fact_exposed:
+            progress_eval["breakdown_probability"] = max(
+                float(progress_eval.get("breakdown_probability", 0.0)),
+                prior_breakdown_probability,
             )
-            progress_eval["fsm_state"] = "Confession / Breakdown"
+            progress_eval["core_fact_exposed"] = True
+            progress_eval["fsm_state"] = EXPOSURE_FSM_STATE
+            progress_eval["statement_collapse_stage"] = 5
+            progress_eval["statement_collapse_label"] = _statement_collapse_label(5)
         pressure_delta = float(progress_eval["pressure_delta"])
-        confession_probability = float(progress_eval["confession_probability"])
+        breakdown_probability = float(
+            progress_eval.get("breakdown_probability", 0.0)
+        )
         cumulative_evidence_ids = list(progress_eval["cumulative_evidence_ids"])
         cumulative_contradiction_ids = list(progress_eval["cumulative_contradiction_ids"])
-        if not confession_triggered:
-            if confession_probability >= CONFESSION_TRIGGER_THRESHOLD:
-                confession_triggered = True
-                progress_eval["fsm_state"] = "Confession / Breakdown"
-                progress_eval["confession_probability"] = confession_probability
+        if not core_fact_exposed:
+            if bool(progress_eval.get("core_fact_exposed", False)) or breakdown_probability >= BREAKDOWN_EXPOSURE_THRESHOLD:
+                core_fact_exposed = True
+                progress_eval["fsm_state"] = EXPOSURE_FSM_STATE
+                progress_eval["breakdown_probability"] = breakdown_probability
+                progress_eval["core_fact_exposed"] = True
+                progress_eval["statement_collapse_stage"] = 5
+                progress_eval["statement_collapse_label"] = _statement_collapse_label(5)
                 suspect_text = trim_to_1_3_sentences(
-                    llm_confession(confession_case_context, history, final_user_text)
+                    llm_core_fact_exposure(exposure_case_context, history, final_user_text)
                 )
         else:
             progress_eval["pressure_delta"] = pressure_delta
-            progress_eval["confession_probability"] = confession_probability
+            progress_eval["breakdown_probability"] = breakdown_probability
+            progress_eval["core_fact_exposed"] = True
 
         # 5) TTS
         wav_b64 = await tts_to_b64(suspect_text)
         next_turn_count = prior_turn_count + 1
+        progress_eval["pad_state"] = _normalize_pad_state_blob(
+            progress_eval.get("pad_state", prior_pad_state)
+        )
+        statement_collapse_stage = max(
+            0,
+            min(5, int(safe_float(progress_eval.get("statement_collapse_stage", 0), 0.0))),
+        )
+        progress_eval["statement_collapse_stage"] = statement_collapse_stage
+        progress_eval["statement_collapse_label"] = _statement_collapse_label(statement_collapse_stage)
+        final_psychological_reaction = norm(progress_eval.get("final_psychological_reaction", ""))
+        judgment_ready = bool(
+            core_fact_exposed
+            or next_turn_count >= MAX_GAME_TURNS
+            or statement_collapse_stage >= 4
+        )
+        if core_fact_exposed or next_turn_count >= MAX_GAME_TURNS:
+            final_psychological_reaction = _generate_final_psychological_reaction(
+                effective_case_data,
+                statement_collapse_stage,
+                progress_eval["pad_state"],
+                bool(core_fact_exposed),
+            )
+        progress_eval["final_psychological_reaction"] = final_psychological_reaction
+        statement_record = _build_statement_record(
+            next_turn_count,
+            final_user_text,
+            question_analysis,
+            suspect_text,
+            rule_based_turn,
+            progress_eval,
+            repeated_question,
+        )
+        statement_records = _normalize_statement_records(
+            prior_statement_records + [statement_record]
+        )
+        post_progress_state = {
+            "breakdown_probability": breakdown_probability,
+            "referenced_evidence_ids": cumulative_evidence_ids,
+            "established_contradiction_ids": cumulative_contradiction_ids,
+            "stress_score": progress_eval["stress_score"],
+            "cooperation_score": progress_eval["cooperation_score"],
+            "cumulative_pressure": progress_eval["cumulative_pressure"],
+            "fsm_state": progress_eval["fsm_state"],
+            "last_raw_odds": progress_eval["raw_odds"],
+            "last_sue_impact": progress_eval["latest_sue_impact"],
+            "statement_collapse_stage": statement_collapse_stage,
+            "pad_state": progress_eval["pad_state"],
+            "final_psychological_reaction": final_psychological_reaction,
+            "selected_personality": active_selected_personality,
+            "statement_records": statement_records,
+            "submitted_judgment": prior_submitted_judgment,
+            "turn_count": next_turn_count,
+        }
+        final_psychological_report = _build_final_psychological_report(
+            effective_case_data,
+            post_progress_state,
+        )
         _store_progress_state(
             case_id,
-            confession_probability,
+            breakdown_probability,
             cumulative_evidence_ids,
             cumulative_contradiction_ids,
             progress_eval["stress_score"],
             progress_eval["cooperation_score"],
+            progress_eval["cumulative_pressure"],
             progress_eval["fsm_state"],
             progress_eval["raw_odds"],
             progress_eval["latest_sue_impact"],
             next_turn_count,
+            statement_collapse_stage,
+            progress_eval["pad_state"],
+            final_psychological_reaction,
+            active_selected_personality,
+            statement_records,
+            prior_submitted_judgment,
+            final_psychological_report,
         )
 
         response_content = {
             "user_text": final_user_text,
+            "question_category": question_category["key"],
+            "question_category_label": question_category["label"],
             "suspect_text": suspect_text,
             "pressure_delta": float(pressure_delta),
-            "confession_probability": float(confession_probability),
-            "confession_triggered": bool(confession_triggered),
+            "breakdown_probability": float(breakdown_probability),
+            "core_fact_exposed": bool(core_fact_exposed),
             "fsm_state": progress_eval["fsm_state"],
             "stress_score": float(progress_eval["stress_score"]),
+            "cumulative_pressure": float(progress_eval["cumulative_pressure"]),
             "raw_odds": float(progress_eval["raw_odds"]),
             "latest_sue_impact": float(progress_eval["latest_sue_impact"]),
+            "statement_collapse_stage": statement_collapse_stage,
+            "statement_collapse_label": progress_eval["statement_collapse_label"],
+            "pad_state": progress_eval["pad_state"],
+            "final_psychological_reaction": final_psychological_reaction,
+            "final_psychological_report": final_psychological_report,
+            "judgment_ready": judgment_ready,
             "turn_count": next_turn_count,
             "audio_wav_b64": wav_b64,
         }
@@ -3554,8 +4739,14 @@ async def interrogation_qna(
                 "signal_guide": {
                     "hard": "Case-data contradiction confirmed by server rules and evidence linkage.",
                     "soft": "Dialogue-flow wobble detected from suspect statement changes.",
+                    "question_categories": QUESTION_CATEGORY_LABELS,
                 },
-                "question_analysis": question_analysis,
+                "question_analysis": {
+                    **question_analysis,
+                    "question_category": question_category["key"],
+                    "question_category_label": question_category["label"],
+                    "question_category_reason": question_category["reason"],
+                },
                 "rule_based_turn": rule_based_turn,
                 "scoring_model": {
                     "player_intent": progress_eval["player_intent"],
@@ -3566,10 +4757,24 @@ async def interrogation_qna(
                     "soft_dialogue_severity": progress_eval.get("soft_dialogue_severity", "none"),
                     "stress_score": float(progress_eval["stress_score"]),
                     "cooperation_score": float(progress_eval["cooperation_score"]),
+                    "cumulative_pressure": float(progress_eval["cumulative_pressure"]),
+                    "turn_pressure_gain": float(progress_eval.get("turn_pressure_gain", 0.0)),
                     "defense_intelligence": float(progress_eval["defense_intelligence"]),
                     "latest_sue_impact": float(progress_eval["latest_sue_impact"]),
                     "raw_odds": float(progress_eval["raw_odds"]),
-                    "confession_probability": float(progress_eval["confession_probability"]),
+                    "breakdown_probability": float(
+                        progress_eval.get("breakdown_probability", 0.0)
+                    ),
+                    "core_fact_exposed": bool(progress_eval.get("core_fact_exposed", False)),
+                    "statement_collapse_stage": statement_collapse_stage,
+                    "statement_collapse_label": progress_eval["statement_collapse_label"],
+                    "pad_state": progress_eval["pad_state"],
+                    "final_psychological_reaction": final_psychological_reaction,
+                    "final_psychological_report": final_psychological_report,
+                    "personality_response_factors": progress_eval.get("personality_response_factors", {}),
+                    "personality_response_breakdown": progress_eval.get("personality_response_breakdown", {}),
+                    "latest_statement_record": statement_record,
+                    "judgment_ready": judgment_ready,
                     "fsm_state": progress_eval["fsm_state"],
                     "turn_count": next_turn_count,
                 },

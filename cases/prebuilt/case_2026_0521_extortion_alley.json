@@ -1,0 +1,154 @@
+{
+  "case_id": "case_2026_0521_extortion",
+  "selection_card": {
+    "title": "역전 골목 협박 및 갈취",
+    "subtitle": "비밀 연애를 약점 삼은 금전 요구",
+    "brief": "피해자의 약점을 폭로하겠다고 협박해 돈을 송금받은 사건이다."
+  },
+  "overview": {
+    "time": "2026-05-21 22:40",
+    "place": "역전 골목 흡연 구역",
+    "type": "협박 및 갈취"
+  },
+  "documents": {
+    "case_overview": {
+      "incident_time": "2026-05-21 22:40",
+      "incident_place": "역전 골목 흡연 구역",
+      "incident_type": "협박 및 갈취",
+      "victim_status": "피해자는 직접 폭행은 없었으나 강한 협박을 받고 돈을 송금했다고 진술했다.",
+      "summary": "용의자는 피해자의 사생활 약점을 폭로하겠다고 협박하며 현장에서 돈을 송금받았다."
+    },
+    "scene_report": {
+      "summary": "현장 자체는 좁은 골목 흡연 구역이며 CCTV와 주변 목격 진술이 확보된 상태다.",
+      "bullet_points": [
+        "상가 CCTV에는 두 사람이 마주 선 채 대화하는 장면이 남아 있다.",
+        "인근 편의점 직원은 용의자가 휴대폰 화면을 들이밀며 압박하는 모습을 봤다고 말했다.",
+        "사건 직후 피해자 계좌에서 용의자 계좌로 송금이 이뤄졌다."
+      ]
+    },
+    "character_info": {
+      "suspect_summary": "용의자는 학원 행정실장으로 피해자의 사적인 비밀을 알고 있었고, 이를 영향력으로 사용했다.",
+      "victim_relation": "같은 학원에서 근무하는 상사급 동료",
+      "conflict_points": [
+        "피해자와 용의자는 최근 업무 배치 문제로 마찰을 겪었다.",
+        "용의자는 피해자의 사생활 비밀을 알고 있었고 이를 자주 암시했다."
+      ]
+    },
+    "reference_statements": [
+      "편의점 직원은 용의자가 피해자에게 휴대폰 화면을 보여주며 돈 얘기를 하는 것을 봤다고 진술했다.",
+      "학원 동료는 사건 이틀 전 용의자가 피해자 약점을 쥐고 있다는 식으로 말한 것을 들었다고 말했다."
+    ],
+    "timeline": [
+      "20:32 - 메신저로 협박성 메시지 전송",
+      "22:38 - 골목 상가 CCTV에 두 사람 포착",
+      "22:40 - 현장 갈취 추정 시각",
+      "22:41 - 피해자 계좌에서 85만원 송금",
+      "22:50 - 용의자 휴대폰이 학원 방향으로 이동"
+    ],
+    "detective_memo": [
+      "학원 사무실 알리바이와 골목 현장 동선을 충돌시키는 질문이 효과적이다.",
+      "피해자를 만난 적 없다는 주장과 CCTV, 목격자 진술을 연결하라.",
+      "돈 요구 사실을 부인하면 메신저 협박 대화와 송금 기록을 순서대로 제시하라."
+    ]
+  },
+  "suspect_profile": {
+    "case_role": "주범",
+    "default_personality": {
+      "openness": 0.37,
+      "conscientiousness": 0.68,
+      "extraversion": 0.56,
+      "agreeableness": 0.22,
+      "neuroticism": 0.63
+    },
+    "mental_state": {
+      "pleasure": 0.31,
+      "arousal": 0.54,
+      "dominance": 0.61
+    }
+  },
+  "motive": "피해자의 비밀 연애 사실을 약점으로 삼아 돈을 뜯어내려 했다.",
+  "crime_flow": "용의자는 같은 학원에서 일하는 피해자의 약점을 알고 이를 폭로하겠다고 협박했다. 사건 당일 22시 40분쯤 역전 골목 흡연 구역에서 피해자를 만나 현금 이체를 요구했고, 피해자가 거부하자 휴대폰에 저장된 대화 캡처를 보여주며 압박해 결국 돈을 송금받았다. 이후 학원 사무실에만 있었다며 피해자를 만난 사실 자체를 부인했다.",
+  "suspect": {
+    "name": "정우람",
+    "age": 31,
+    "job": "보습학원 행정실장",
+    "relation": "같은 학원에서 근무하는 상사급 동료"
+  },
+  "false_statement": "저는 그날 밤 계속 학원 사무실에 있었고, 피해자를 따로 만난 적도 없으며 돈을 요구한 사실도 없습니다.",
+  "truth_slots": {
+    "crime_time": "22:40",
+    "crime_place": "역전 골목 흡연 구역",
+    "weapon": "휴대폰 저장 캡처",
+    "victim_relation": "같은 학원 상사급 동료",
+    "alibi_claim": "학원 사무실에 있었다",
+    "actual_action": "피해자를 만나 비밀을 폭로하겠다고 협박하며 돈을 요구했다",
+    "last_seen_place": "역전 골목 흡연 구역",
+    "met_victim_that_day": "yes"
+  },
+  "evidences": [
+    {
+      "id": "e1",
+      "name": "골목 상가 CCTV",
+      "description": "22시 38분부터 22시 44분 사이 용의자와 피해자가 역전 골목 흡연 구역에서 마주 서서 대화하는 장면이 촬영됐다.",
+      "aliases": ["골목 CCTV", "흡연구역 카메라", "상가 카메라"]
+    },
+    {
+      "id": "e2",
+      "name": "계좌 이체 기록",
+      "description": "22시 41분 피해자 계좌에서 용의자 명의 계좌로 85만원이 송금된 내역이 확인됐다.",
+      "aliases": ["송금 내역", "계좌 기록", "이체 기록"]
+    },
+    {
+      "id": "e3",
+      "name": "메신저 협박 대화",
+      "description": "사건 두 시간 전 용의자가 '말 안 들으면 학원에 다 알리겠다'고 보낸 메시지와 금액 요구 내용이 남아 있다.",
+      "aliases": ["채팅 캡처", "협박 메시지", "메신저 기록"]
+    },
+    {
+      "id": "e4",
+      "name": "휴대폰 위치 기록",
+      "description": "용의자 휴대폰은 사건 시각 역전 골목 흡연 구역 인근 기지국에 접속했고, 22시 50분 이후에야 학원 방향으로 이동했다.",
+      "aliases": ["위치 기록", "기지국 기록", "휴대폰 동선"]
+    },
+    {
+      "id": "e5",
+      "name": "흡연 구역 목격자 진술",
+      "description": "인근 편의점 직원은 용의자가 피해자에게 휴대폰 화면을 들이밀며 돈 얘기를 하는 모습을 봤다고 진술했다.",
+      "aliases": ["편의점 직원 진술", "목격자 말", "직원 증언"]
+    }
+  ],
+  "contradictions": [
+    {
+      "id": "c1",
+      "description": "용의자는 학원 사무실에 있었다고 했지만 위치 기록과 CCTV는 사건 시각 골목 흡연 구역에 있었음을 보여준다.",
+      "related_evidence": ["e1", "e4"],
+      "slot": "crime_place",
+      "truth_value": "역전 골목 흡연 구역",
+      "contradiction_type": "claim_vs_evidence"
+    },
+    {
+      "id": "c2",
+      "description": "용의자는 피해자를 따로 만나지 않았다고 했지만 CCTV와 목격자 진술상 두 사람은 사건 당일 직접 만났다.",
+      "related_evidence": ["e1", "e5"],
+      "slot": "met_victim_that_day",
+      "truth_value": "yes",
+      "contradiction_type": "claim_vs_evidence"
+    },
+    {
+      "id": "c3",
+      "description": "용의자는 돈을 요구한 적 없다고 했지만 협박 대화와 직후의 계좌 이체 기록은 갈취 정황을 뒷받침한다.",
+      "related_evidence": ["e2", "e3"],
+      "slot": "actual_action",
+      "truth_value": "피해자를 만나 비밀을 폭로하겠다고 협박하며 돈을 요구했다",
+      "contradiction_type": "claim_vs_evidence"
+    },
+    {
+      "id": "c4",
+      "description": "용의자는 현장에 간 적이 없다고 했지만 사건 시각과 마지막 목격 장소는 모두 역전 골목 흡연 구역으로 수렴한다.",
+      "related_evidence": ["e1", "e4", "e5"],
+      "slot": "last_seen_place",
+      "truth_value": "역전 골목 흡연 구역",
+      "contradiction_type": "timeline_mismatch"
+    }
+  ]
+}
