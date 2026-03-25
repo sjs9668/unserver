@@ -2256,6 +2256,15 @@ def evaluate_interrogation_progress_v3(
         pad_state,
         case_data,
     )
+    statement_collapse_stage = max(
+        statement_collapse_stage,
+        _soft_dialogue_stage_floor(
+            dialogue_contradiction_signal,
+            cumulative_pressure,
+            pad_state,
+            repeated_question,
+        ),
+    )
     fsm_state = core.evaluate_fsm_state(
         breakdown_probability,
         len(cumulative_contradiction_ids),
@@ -2780,25 +2789,65 @@ def _calculate_personality_response_factors(
     agreeableness = personality["agreeableness"]
     neuroticism = personality["neuroticism"]
 
-    pressure_multiplier = 1.0 + (0.18 * neuroticism) - (0.12 * conscientiousness)
+    pressure_multiplier = 1.0 + (0.28 * neuroticism) - (0.18 * conscientiousness)
     if player_intent == "Rapport":
-        pressure_multiplier -= 0.08 * agreeableness
+        pressure_multiplier -= 0.12 * agreeableness
     elif player_intent == "Intimidate":
-        pressure_multiplier += 0.05 + (0.06 * neuroticism)
+        pressure_multiplier += 0.08 + (0.10 * neuroticism)
     elif player_intent == "Confront":
-        pressure_multiplier += 0.03 + (0.04 * openness)
+        pressure_multiplier += 0.05 + (0.08 * openness)
 
     return {
-        "pressure_multiplier": max(0.75, min(1.45, pressure_multiplier)),
-        "stress_multiplier": max(0.7, min(1.6, 0.88 + (0.62 * neuroticism) - (0.20 * conscientiousness))),
-        "direct_bonus_multiplier": max(0.8, min(1.45, 0.96 + (0.28 * neuroticism) + (0.10 * agreeableness) - (0.18 * conscientiousness))),
-        "cooperation_shift": max(-0.12, min(0.12, ((agreeableness - 0.5) * 0.10) + ((extraversion - 0.5) * 0.04) - ((neuroticism - 0.5) * 0.04))),
-        "arousal_sensitivity": max(0.8, min(1.7, 0.95 + (0.70 * neuroticism) + (0.10 * openness))),
-        "dominance_resistance": max(0.75, min(1.4, 0.90 + (0.45 * conscientiousness) - (0.10 * agreeableness))),
-        "collapse_resistance": max(0.7, min(1.5, 0.95 + (0.80 * conscientiousness) - (0.20 * neuroticism))),
-        "rapport_affinity": max(0.8, min(1.3, 0.95 + (0.40 * agreeableness))),
-        "reply_length_bias": max(0.8, min(1.25, 0.90 + (0.40 * extraversion))),
+        "pressure_multiplier": max(0.65, min(1.65, pressure_multiplier)),
+        "stress_multiplier": max(0.6, min(1.85, 0.82 + (0.85 * neuroticism) - (0.28 * conscientiousness))),
+        "direct_bonus_multiplier": max(0.72, min(1.6, 0.92 + (0.34 * neuroticism) + (0.12 * agreeableness) - (0.24 * conscientiousness))),
+        "cooperation_shift": max(-0.18, min(0.18, ((agreeableness - 0.5) * 0.18) + ((extraversion - 0.5) * 0.07) - ((neuroticism - 0.5) * 0.08))),
+        "arousal_sensitivity": max(0.72, min(1.95, 0.88 + (0.92 * neuroticism) + (0.16 * openness))),
+        "dominance_resistance": max(0.65, min(1.5, 0.86 + (0.58 * conscientiousness) - (0.18 * agreeableness))),
+        "collapse_resistance": max(0.58, min(1.7, 0.88 + (0.96 * conscientiousness) - (0.34 * neuroticism))),
+        "rapport_affinity": max(0.72, min(1.45, 0.88 + (0.62 * agreeableness))),
+        "reply_length_bias": max(0.62, min(1.65, 0.70 + (0.95 * extraversion))),
+        "rigidity_bias": max(0.65, min(1.55, 1.05 + (0.62 * conscientiousness) - (0.34 * openness))),
+        "friendliness_bias": max(0.6, min(1.55, 0.78 + (0.92 * agreeableness) - (0.12 * neuroticism))),
+        "volatility_bias": max(0.6, min(1.65, 0.80 + (0.78 * neuroticism) - (0.24 * conscientiousness))),
     }
+
+def _build_personality_speaking_directives(case_data: Optional[Dict[str, Any]]) -> List[str]:
+    personality = _case_personality(case_data)
+    openness = personality["openness"]
+    conscientiousness = personality["conscientiousness"]
+    extraversion = personality["extraversion"]
+    agreeableness = personality["agreeableness"]
+    neuroticism = personality["neuroticism"]
+
+    directives: List[str] = []
+
+    if openness >= 0.7:
+        directives.append("- High openness: when pressured, reach for alternative framing or side explanations more readily.")
+    elif openness <= 0.3:
+        directives.append("- Low openness: stay rigid and repetitive. Reuse the same denial frame instead of inventing new angles.")
+
+    if conscientiousness >= 0.7:
+        directives.append("- High conscientiousness: sound careful, controlled, and precise. Protect internal consistency.")
+    elif conscientiousness <= 0.3:
+        directives.append("- Low conscientiousness: allow looser wording, slight messiness, and small self-corrections.")
+
+    if extraversion >= 0.75:
+        directives.append("- High extraversion: use fuller spoken wording and usually give 2 short sentences rather than 1.")
+    elif extraversion <= 0.3:
+        directives.append("- Low extraversion: prefer a single clipped sentence unless detail is unavoidable.")
+
+    if agreeableness >= 0.7:
+        directives.append("- High agreeableness: sound softer, more cooperative, and less combative.")
+    elif agreeableness <= 0.3:
+        directives.append("- Low agreeableness: sound curt, prickly, and resistant to cooperation.")
+
+    if neuroticism >= 0.7:
+        directives.append("- High neuroticism: show nervousness, hedging, and visible strain under pressure.")
+    elif neuroticism <= 0.3:
+        directives.append("- Low neuroticism: stay flat, composed, and hard to rattle even under pressure.")
+
+    return directives
 
 def _build_personality_response_breakdown(
     case_data: Optional[Dict[str, Any]],
@@ -2823,6 +2872,7 @@ def _build_personality_response_breakdown(
             "cooperation": "agreeableness and extraversion soften cooperation loss",
             "collapse": "conscientiousness delays collapse, neuroticism accelerates wobble",
             "pad": "neuroticism pushes arousal up faster, agreeableness lowers dominance under pressure",
+            "speech": "extraversion changes response length, agreeableness changes warmth, openness changes reframing, conscientiousness changes consistency, neuroticism changes shakiness",
             "model": "turn pressure accumulates into cumulative_pressure, then sigmoid converts it to breakdown_probability",
         },
     }
@@ -2932,6 +2982,47 @@ def _calculate_statement_collapse_stage(
 
     return max(max(0, min(5, int(prior_stage))), stage)
 
+def _soft_dialogue_stage_floor(
+    dialogue_contradiction_signal: Optional[Dict[str, Any]],
+    cumulative_pressure: float,
+    pad_state: Dict[str, float],
+    repeated_question: bool,
+) -> int:
+    signal = dialogue_contradiction_signal or {}
+    severity = str(signal.get("severity", "none")).strip().lower()
+    if severity not in {"low", "medium", "high"}:
+        return 0
+
+    floor = {
+        "low": 1,
+        "medium": 2,
+        "high": 2,
+    }.get(severity, 0)
+
+    if signal.get("suspect_self_contradicted"):
+        floor = max(floor, 2 if severity in {"medium", "high"} else 1)
+    if signal.get("detective_highlighted") and cumulative_pressure >= 0.14:
+        floor = max(floor, 1)
+
+    arousal = clamp01(pad_state.get("arousal", 0.5))
+    dominance = clamp01(pad_state.get("dominance", 0.5))
+
+    if cumulative_pressure >= 0.24 or arousal >= 0.66:
+        floor = max(floor, 2)
+    if (
+        severity == "high"
+        and cumulative_pressure >= 0.42
+        and arousal >= 0.78
+        and dominance <= 0.42
+        and not repeated_question
+    ):
+        floor = max(floor, 3)
+
+    if repeated_question:
+        floor = min(floor, 2)
+
+    return max(0, min(5, floor))
+
 def _generate_final_psychological_reaction(
     case_data: Optional[Dict[str, Any]],
     statement_collapse_stage: int,
@@ -2971,6 +3062,37 @@ def _generate_final_psychological_reaction(
             return "용의자는 겉으로는 차분하려 하지만 표정이 굳어 있고, 질문 의도를 경계하며 최소한의 말로 버티고 있다."
         return f"이 {role}은 아직 큰 붕괴는 없지만, 방어적으로 진술을 반복하며 심문 흐름을 조심스럽게 살피고 있다."
     return f"이 {role}은 현재까지는 진술 구조를 비교적 안정적으로 유지하고 있으며, 질문 주도권을 쉽게 넘기지 않으려 한다."
+
+def build_final_reaction_speech(
+    case_data: Optional[Dict[str, Any]],
+    statement_collapse_stage: int,
+    pad_state: Dict[str, float],
+    core_fact_exposed: bool,
+) -> str:
+    personality = _case_personality(case_data)
+    arousal = clamp01(pad_state.get("arousal", 0.5))
+    dominance = clamp01(pad_state.get("dominance", 0.5))
+    agreeableness = personality["agreeableness"]
+    conscientiousness = personality["conscientiousness"]
+
+    if core_fact_exposed or statement_collapse_stage >= 5:
+        if arousal >= 0.9:
+            return "더는 같은 말을 계속 반복하기 어렵습니다. 지금은 조금만 정리할 시간을 주십시오."
+        if dominance <= 0.32:
+            return "계속 그렇게 몰아붙이시면 제가 정리가 안 됩니다. 지금은 더 말을 보태기 어렵습니다."
+        if agreeableness >= 0.6:
+            return "지금은 차분히 정리해서 다시 말씀드리는 게 맞겠습니다. 섭불리 단정해서 말씀드리기 어렵습니다."
+        return "지금은 더 버티기 어렵습니다. 다만 여기서 제가 다 말씀드릴 수는 없습니다."
+
+    if statement_collapse_stage >= 4:
+        if conscientiousness >= 0.7:
+            return "제 말이 조금 흔들릴 수는 있어도, 지금 바로 단정해서 말씀드리긴 어렵습니다."
+        return "지금은 제가 말씀을 정리해야 할 것 같습니다. 같은 말만 반복하기도 어렵습니다."
+
+    if statement_collapse_stage >= 2:
+        return "제가 바로 답을 못 드리는 건 맞지만, 지금 드린 말 이상으로 보태기는 어렵습니다."
+
+    return "제가 드린 말씀에서 크게 달라진 건 없습니다. 지금은 그 정도로만 말씀드리겠습니다."
 
 def _normalize_documents(
     raw_documents: Any,
@@ -3345,17 +3467,6 @@ def _build_suspect_answer_system_prompt() -> str:
         "When history is empty, answer as if this is the first time you are responding.\n"
     )
 
-def _build_core_fact_exposure_system_prompt() -> str:
-    return (
-        "You are a suspect whose statement structure has collapsed under interrogation.\n"
-        "Reply in natural spoken Korean using polite speech (존댓말).\n"
-        "Use 1 or 2 short sentences, at most 3.\n"
-        "Never use banmal.\n"
-        "Do not sound theatrical, poetic, or robotic.\n"
-        "Expose one or two core facts directly instead of giving a dramatic full confession.\n"
-        "You may sound shaken, resigned, or defensive, but keep it grounded and factual.\n"
-    )
-
 def llm_suspect_answer(
     case_context: str,
     case_data: Optional[Dict[str, Any]],
@@ -3391,11 +3502,13 @@ def llm_suspect_answer(
     has_current_contradiction = str((interrogation_signal or {}).get("intent", "")).strip().lower() == "point_contradiction"
     current_pad_state = _normalize_pad_state_blob(pad_state or {})
     collapse_label = _statement_collapse_label(statement_collapse_stage)
+    personality = _case_personality(case_data)
     reply_personality_factors = _calculate_personality_response_factors(
         case_data,
         _infer_player_intent(interrogation_signal),
     )
     reply_length_bias = reply_personality_factors.get("reply_length_bias", 1.0)
+    personality_speaking_directives = _build_personality_speaking_directives(case_data)
 
     extra_guard = ""
     if turn_pressure_context:
@@ -3410,8 +3523,12 @@ def llm_suspect_answer(
         extra_guard += "\n- Sound colder and more resistant. You may push back and cooperate less."
     elif behavior_state == "Pressured / Shaken":
         extra_guard += "\n- Let slight hesitation or a small wobble show in the wording."
-    if reply_length_bias <= 0.92:
+    if reply_length_bias <= 0.82:
+        extra_guard += "\n- Keep the reply very short: usually 1 compact sentence, or 2 only if unavoidable."
+    elif reply_length_bias <= 0.95:
         extra_guard += "\n- Keep the reply especially short and compact."
+    elif reply_length_bias >= 1.35:
+        extra_guard += "\n- Use fuller spoken wording and prefer 2 short sentences with a little extra explanation."
     elif reply_length_bias >= 1.10:
         extra_guard += "\n- You may use slightly fuller wording, but stay within 2 short sentences."
     if statement_collapse_stage >= 4:
@@ -3435,10 +3552,20 @@ def llm_suspect_answer(
         extra_guard += "\n- Do not imply any prior explanation or prior statement."
         extra_guard += "\n- Do not use phrases like '말씀드렸습니다', '아까 말했다', '전에 말했다', or '이미 말했듯이'."
 
+    if personality_speaking_directives:
+        extra_guard += "\n[Personality speaking style]\n" + "\n".join(personality_speaking_directives)
+
     user = (
         case_context
         + f"\n[Current behavioral state] {behavior_state}\n"
         + f"[Current statement collapse stage] {statement_collapse_stage} ({collapse_label})\n"
+        + (
+            f"[Selected Big Five] openness:{personality['openness']:.2f} "
+            f"conscientiousness:{personality['conscientiousness']:.2f} "
+            f"extraversion:{personality['extraversion']:.2f} "
+            f"agreeableness:{personality['agreeableness']:.2f} "
+            f"neuroticism:{personality['neuroticism']:.2f}\n"
+        )
         + (
             f"[Current PAD state] pleasure:{current_pad_state['pleasure']:.2f} "
             f"arousal:{current_pad_state['arousal']:.2f} "
@@ -3455,8 +3582,8 @@ def llm_suspect_answer(
 
     def _generate_suspect_reply(prompt_text: str, max_output_tokens: int = 220) -> str:
         adjusted_tokens = max(
-            140,
-            min(260, int(round(max_output_tokens * max(0.85, min(1.15, reply_length_bias))))),
+            110,
+            min(320, int(round(max_output_tokens * max(0.72, min(1.35, reply_length_bias))))),
         )
         resp = client.responses.create(
             model=LLM_MODEL,
@@ -3754,37 +3881,6 @@ def detect_dialogue_contradiction_local(
         "current_claim": "",
         "reason": "no local contradiction detected",
     }
-
-def llm_core_fact_exposure(case_context: str, history: List[Dict[str, Any]], user_text: str) -> str:
-
-    recent = history[-4:] if isinstance(history, list) else []
-    hist_lines = []
-    for h in recent:
-        if not isinstance(h, dict):
-            continue
-        u = (h.get("user_text", "") or "").strip()
-        s = (h.get("suspect_text", "") or "").strip()
-        if u:
-            hist_lines.append(f"형사: {u}")
-        if s:
-            hist_lines.append(f"용의자: {s}")
-
-    user = (
-        case_context +
-        "\n[최근 대화]\n" + ("\n".join(hist_lines) if hist_lines else "(없음)") + "\n"
-        f"\n형사의 마지막 압박/질문: {user_text}\n"
-        "이제 범행을 자백하라."
-    )
-
-    resp = client.responses.create(
-        model=LLM_MODEL,
-        input=[
-            {"role": "system", "content": _build_core_fact_exposure_system_prompt()},
-            {"role": "user", "content": user},
-        ],
-        max_output_tokens=200,
-    )
-    return trim_to_1_3_sentences((resp.output_text or "").strip()) or "…제가 했습니다. 더는 숨길 수 없어요."
 
 def _resolve_case_from_request(
     case_id: str,
@@ -4149,16 +4245,15 @@ async def interrogation_debug_confess(
 
         prior_progress = _get_progress_state(case_id)
         effective_case_data = _effective_case_from_progress(case_data, prior_progress)
-        case_context = build_case_context(effective_case_data, include_hidden_truth=True)
-        suspect_text = trim_to_1_3_sentences(
-            llm_core_fact_exposure(case_context, history, final_user_text)
-        )
-        wav_b64 = await tts_to_b64(suspect_text)
         debug_pad_state = {
             "pleasure": 0.08,
             "arousal": 0.94,
             "dominance": 0.12,
         }
+        suspect_text = trim_to_1_3_sentences(
+            build_final_reaction_speech(effective_case_data, 5, debug_pad_state, True)
+        )
+        wav_b64 = await tts_to_b64(suspect_text)
         final_psychological_reaction = _generate_final_psychological_reaction(
             effective_case_data,
             5,
@@ -4250,7 +4345,7 @@ async def interrogation_debug_confess(
                 "final_psychological_report": final_psychological_report,
                 "judgment_ready": True,
                 "turn_count": MAX_GAME_TURNS,
-                "debug_force_core_fact_exposure": True,
+                "debug_force_breakdown_state": True,
                 "audio_wav_b64": wav_b64,
             },
         )
@@ -4429,7 +4524,6 @@ async def interrogation_qna(
             active_selected_personality,
         )
         suspect_case_context = build_case_context(effective_case_data, include_hidden_truth=False)
-        exposure_case_context = build_case_context(effective_case_data, include_hidden_truth=True)
         prior_pad_state = _normalize_pad_state_blob(
             prior_progress.get("pad_state", _case_baseline_pad_state(effective_case_data))
         )
@@ -4556,20 +4650,17 @@ async def interrogation_qna(
         current_behavior_state = norm(prior_progress.get("fsm_state", DEFAULT_FSM_STATE)) or DEFAULT_FSM_STATE
 
         # 4) LLM answer
-        if core_fact_exposed:
-            suspect_text = llm_core_fact_exposure(exposure_case_context, history, final_user_text)
-        else:
-            suspect_text = llm_suspect_answer(
-                suspect_case_context,
-                effective_case_data,
-                history,
-                final_user_text,
-                prior_breakdown_probability,
-                question_analysis,
-                current_behavior_state,
-                prior_statement_collapse_stage,
-                prior_pad_state,
-            )
+        suspect_text = llm_suspect_answer(
+            suspect_case_context,
+            effective_case_data,
+            history,
+            final_user_text,
+            prior_breakdown_probability,
+            question_analysis,
+            current_behavior_state,
+            prior_statement_collapse_stage,
+            prior_pad_state,
+        )
 
         suspect_text = trim_to_1_3_sentences(suspect_text)
         rule_based_turn = analyze_interrogation_turn_rule_based(
@@ -4623,9 +4714,6 @@ async def interrogation_qna(
                 progress_eval["core_fact_exposed"] = True
                 progress_eval["statement_collapse_stage"] = 5
                 progress_eval["statement_collapse_label"] = _statement_collapse_label(5)
-                suspect_text = trim_to_1_3_sentences(
-                    llm_core_fact_exposure(exposure_case_context, history, final_user_text)
-                )
         else:
             progress_eval["pressure_delta"] = pressure_delta
             progress_eval["breakdown_probability"] = breakdown_probability
@@ -4655,6 +4743,15 @@ async def interrogation_qna(
                 statement_collapse_stage,
                 progress_eval["pad_state"],
                 bool(core_fact_exposed),
+            )
+        if core_fact_exposed:
+            suspect_text = trim_to_1_3_sentences(
+                build_final_reaction_speech(
+                    effective_case_data,
+                    statement_collapse_stage,
+                    progress_eval["pad_state"],
+                    True,
+                )
             )
         progress_eval["final_psychological_reaction"] = final_psychological_reaction
         statement_record = _build_statement_record(
