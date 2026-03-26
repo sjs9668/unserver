@@ -2820,34 +2820,63 @@ def _build_personality_speaking_directives(case_data: Optional[Dict[str, Any]]) 
     agreeableness = personality["agreeableness"]
     neuroticism = personality["neuroticism"]
 
-    directives: List[str] = []
+    directives: List[str] = [
+        "- Make the personality difference obvious on the surface of the reply, not only in hidden state.",
+    ]
 
     if openness >= 0.7:
-        directives.append("- High openness: when pressured, reach for alternative framing or side explanations more readily.")
+        directives.append("- High openness: reframe the situation more readily and reach for alternative angles or side explanations.")
     elif openness <= 0.3:
-        directives.append("- Low openness: stay rigid and repetitive. Reuse the same denial frame instead of inventing new angles.")
+        directives.append("- Low openness: stay rigid and repetitive. Reuse the same denial frame and avoid new angles.")
 
     if conscientiousness >= 0.7:
-        directives.append("- High conscientiousness: sound careful, controlled, and precise. Protect internal consistency.")
+        directives.append("- High conscientiousness: sound careful, controlled, and precise. Keep the wording organized and internally consistent.")
     elif conscientiousness <= 0.3:
-        directives.append("- Low conscientiousness: allow looser wording, slight messiness, and small self-corrections.")
+        directives.append("- Low conscientiousness: allow looser wording, slight messiness, and small mid-sentence self-corrections.")
 
     if extraversion >= 0.75:
-        directives.append("- High extraversion: use fuller spoken wording and usually give 2 short sentences rather than 1.")
+        directives.append("- High extraversion: be visibly more talkative. Usually give 2 or 3 spoken sentences, and add one short follow-up explanation after the direct answer.")
     elif extraversion <= 0.3:
-        directives.append("- Low extraversion: prefer a single clipped sentence unless detail is unavoidable.")
+        directives.append("- Low extraversion: be visibly clipped. Usually stop after 1 short sentence and avoid voluntary follow-up explanation.")
 
     if agreeableness >= 0.7:
-        directives.append("- High agreeableness: sound softer, more cooperative, and less combative.")
+        directives.append("- High agreeableness: sound softer, more cooperative, and more accommodating. Mild apologies or deference are acceptable.")
     elif agreeableness <= 0.3:
-        directives.append("- Low agreeableness: sound curt, prickly, and resistant to cooperation.")
+        directives.append("- Low agreeableness: sound curt, prickly, and resistant. Avoid apologetic softeners unless absolutely necessary.")
 
     if neuroticism >= 0.7:
-        directives.append("- High neuroticism: show nervousness, hedging, and visible strain under pressure.")
+        directives.append("- High neuroticism: show nervousness, hedging, and visible strain under pressure. Let uncertainty markers and verbal wobble appear.")
     elif neuroticism <= 0.3:
-        directives.append("- Low neuroticism: stay flat, composed, and hard to rattle even under pressure.")
+        directives.append("- Low neuroticism: stay flat, composed, and hard to rattle. Avoid nervous hedging.")
 
     return directives
+
+def _postprocess_reply_by_personality(
+    text: str,
+    case_data: Optional[Dict[str, Any]],
+    pressure_level: str,
+    has_current_contradiction: bool,
+) -> str:
+    out = trim_to_1_3_sentences(text)
+    sentences = _split_short_sentences(out)
+    if not sentences:
+        return out
+
+    extraversion = _case_personality(case_data)["extraversion"]
+
+    if extraversion <= 0.25 and len(sentences) >= 2:
+        return norm(sentences[0])
+
+    if extraversion <= 0.4 and len(sentences) >= 3:
+        return norm(" ".join(sentences[:2]))
+
+    if extraversion >= 0.8:
+        return out
+
+    if (pressure_level in {"medium", "high"} or has_current_contradiction) and len(sentences) >= 3:
+        return norm(" ".join(sentences[:2]))
+
+    return out
 
 def _build_personality_response_breakdown(
     case_data: Optional[Dict[str, Any]],
@@ -3447,7 +3476,9 @@ def _build_suspect_answer_system_prompt() -> str:
     return (
         "You are a suspect being interrogated by a detective.\n"
         "Reply in natural spoken Korean using polite speech (존댓말) every turn.\n"
-        "Use 1 or 2 short sentences, at most 3.\n"
+        "Use 1 to 3 spoken sentences.\n"
+        "Let the selected personality visibly change brevity, warmth, hesitation, rigidity, and willingness to elaborate.\n"
+        "Do not flatten all suspects into the same generic voice.\n"
         "Never use banmal.\n"
         "Do not sound like a narrator, a report, or an AI assistant.\n"
         "Answer the detective's latest question or accusation directly in the first sentence.\n"
@@ -3518,19 +3549,19 @@ def llm_suspect_answer(
         extra_guard += "\n- Keep the reply polite, short, and focused on that inconsistency."
     elif pressure_level in {"medium", "high"}:
         extra_guard += "\n- Respond to the pressure point directly instead of broadening the story."
-        extra_guard += "\n- Stay polite and give only one concrete detail."
+        extra_guard += "\n- Stay polite and give only one concrete detail, but let the personality still shape how terse or talkative the surrounding wording feels."
     if behavior_state == "Angry / Uncooperative":
         extra_guard += "\n- Sound colder and more resistant. You may push back and cooperate less."
     elif behavior_state == "Pressured / Shaken":
         extra_guard += "\n- Let slight hesitation or a small wobble show in the wording."
     if reply_length_bias <= 0.82:
-        extra_guard += "\n- Keep the reply very short: usually 1 compact sentence, or 2 only if unavoidable."
+        extra_guard += "\n- Keep the reply very short: usually exactly 1 compact sentence, or 2 only if absolutely unavoidable."
     elif reply_length_bias <= 0.95:
-        extra_guard += "\n- Keep the reply especially short and compact."
+        extra_guard += "\n- Keep the reply especially short and compact. Do not volunteer a second sentence unless needed."
     elif reply_length_bias >= 1.35:
-        extra_guard += "\n- Use fuller spoken wording and prefer 2 short sentences with a little extra explanation."
+        extra_guard += "\n- Use fuller spoken wording and prefer 2 or 3 short sentences with a visible follow-up explanation or reaction."
     elif reply_length_bias >= 1.10:
-        extra_guard += "\n- You may use slightly fuller wording, but stay within 2 short sentences."
+        extra_guard += "\n- You may use fuller wording and prefer 2 short sentences rather than 1."
     if statement_collapse_stage >= 4:
         extra_guard += "\n- The statement structure is close to collapsing. Let short corrections and unstable wording appear naturally."
     elif statement_collapse_stage >= 3:
@@ -3582,8 +3613,8 @@ def llm_suspect_answer(
 
     def _generate_suspect_reply(prompt_text: str, max_output_tokens: int = 220) -> str:
         adjusted_tokens = max(
-            110,
-            min(320, int(round(max_output_tokens * max(0.72, min(1.35, reply_length_bias))))),
+            90,
+            min(380, int(round(max_output_tokens * max(0.55, min(1.6, reply_length_bias))))),
         )
         resp = client.responses.create(
             model=LLM_MODEL,
@@ -3603,6 +3634,13 @@ def llm_suspect_answer(
             + "\n\n[Correction] The previous reply mentioned evidence or facts the detective did not bring up. Remove that and answer with only a general denial or limited explanation."
         )
         out = _generate_suspect_reply(retry_user, 200)
+
+    out = _postprocess_reply_by_personality(
+        out,
+        case_data,
+        pressure_level,
+        has_current_contradiction,
+    )
 
     review = llm_review_suspect_reply(user_text, out)
     should_retry_for_specificity = (
