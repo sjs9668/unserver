@@ -54,16 +54,16 @@
   "suspect_profile": {
     "case_role": "범행과 직접 관련 없음",
     "default_personality": {
-      "openness": 0.37,
-      "conscientiousness": 0.68,
-      "extraversion": 0.56,
-      "agreeableness": 0.22,
-      "neuroticism": 0.63
+      "openness": 0.5,
+      "conscientiousness": 0.5,
+      "extraversion": 0.5,
+      "agreeableness": 0.5,
+      "neuroticism": 0.5
     },
     "mental_state": {
-      "pleasure": 0.31,
-      "arousal": 0.54,
-      "dominance": 0.61
+      "pleasure": 0.5,
+      "arousal": 0.5,
+      "dominance": 0.5
     }
   },
   "motive": "용의자는 자신의 비밀과 금전 문제를 숨기기 위해 만남과 말다툼을 감췄지만, 살인을 저지를 동기와 실행 정황은 부족하다.",

@@ -53,16 +53,16 @@
   "suspect_profile": {
     "case_role": "주범",
     "default_personality": {
-      "openness": 0.34,
-      "conscientiousness": 0.62,
-      "extraversion": 0.29,
-      "agreeableness": 0.27,
-      "neuroticism": 0.74
+      "openness": 0.5,
+      "conscientiousness": 0.5,
+      "extraversion": 0.5,
+      "agreeableness": 0.5,
+      "neuroticism": 0.5
     },
     "mental_state": {
-      "pleasure": 0.33,
-      "arousal": 0.58,
-      "dominance": 0.49
+      "pleasure": 0.5,
+      "arousal": 0.5,
+      "dominance": 0.5
     }
   },
   "motive": "피해자에게 진 빚과 생활고 때문에 차량 내부 금품을 노렸고, 들키자 격분해 살인으로 번졌다.",

@@ -4534,7 +4534,7 @@ async def interrogation_qna(
         )
 
         if prior_core_fact_exposed:
-            msg = "이미 피의자가 자백했습니다. 이번 심문은 종료됐습니다."
+            msg = "이미 진술 붕괴가 발생했습니다. 이번 심문은 종료됐습니다."
             return JSONResponse(
                 status_code=200,
                 content={
