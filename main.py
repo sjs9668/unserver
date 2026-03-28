@@ -2725,8 +2725,6 @@ def _build_final_psychological_report(
             "summary_tags": summary_tags,
             "judgment_ready": bool(
                 progress.get("turn_count", 0) >= MAX_GAME_TURNS
-                or progress.get("core_fact_exposed", False)
-                or stage >= 4
             ),
         }
     )
@@ -4104,6 +4102,16 @@ async def interrogation_judgment_submit(
 
         progress_state = _get_progress_state(resolved_case_id)
         effective_case = _effective_case_from_progress(case_data, progress_state)
+        if int(progress_state.get("turn_count", 0) or 0) < MAX_GAME_TURNS:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": "judgment_not_ready",
+                    "message": "Judgment can be submitted only after the interrogation reaches the turn limit.",
+                    "turn_count": int(progress_state.get("turn_count", 0) or 0),
+                    "max_turns": MAX_GAME_TURNS,
+                },
+            )
         submitted_judgment = _normalize_submitted_judgment(
             {
                 "choice_key": choice_key,
@@ -4571,32 +4579,6 @@ async def interrogation_qna(
             or prior_breakdown_probability >= BREAKDOWN_EXPOSURE_THRESHOLD
         )
 
-        if prior_core_fact_exposed:
-            msg = "이미 진술 붕괴가 발생했습니다. 이번 심문은 종료됐습니다."
-            return JSONResponse(
-                status_code=200,
-                content={
-                    "user_text": final_user_text,
-                    "suspect_text": msg,
-                    "pressure_delta": 0.0,
-                    "breakdown_probability": prior_breakdown_probability,
-                    "core_fact_exposed": True,
-                    "fsm_state": EXPOSURE_FSM_STATE,
-                    "stress_score": float(prior_progress.get("stress_score", 0.0)),
-                    "cumulative_pressure": prior_cumulative_pressure,
-                    "raw_odds": float(prior_progress.get("last_raw_odds", 0.0)),
-                    "latest_sue_impact": float(prior_progress.get("last_sue_impact", 0.0)),
-                    "statement_collapse_stage": prior_statement_collapse_stage,
-                    "statement_collapse_label": _statement_collapse_label(prior_statement_collapse_stage),
-                    "pad_state": prior_pad_state,
-                    "final_psychological_reaction": prior_final_psychological_reaction,
-                    "final_psychological_report": prior_final_psychological_report,
-                    "judgment_ready": True,
-                    "turn_count": prior_turn_count,
-                    "audio_wav_b64": await tts_to_b64(msg),
-                },
-            )
-
         if prior_turn_count >= MAX_GAME_TURNS:
             msg = "이미 이번 심문은 종료됐습니다."
             return JSONResponse(
@@ -4708,13 +4690,11 @@ async def interrogation_qna(
             suspect_text,
             question_analysis,
         )
-        dialogue_contradiction_signal = _empty_dialogue_contradiction_signal("not evaluated")
-        if not core_fact_exposed:
-            dialogue_contradiction_signal = detect_dialogue_contradiction_local(
-                history,
-                final_user_text,
-                suspect_text,
-            )
+        dialogue_contradiction_signal = detect_dialogue_contradiction_local(
+            history,
+            final_user_text,
+            suspect_text,
+        )
         rule_based_turn["soft_dialogue_contradiction"] = bool(
             dialogue_contradiction_signal.get("detective_highlighted")
             or dialogue_contradiction_signal.get("suspect_self_contradicted")
@@ -4770,25 +4750,21 @@ async def interrogation_qna(
         progress_eval["statement_collapse_stage"] = statement_collapse_stage
         progress_eval["statement_collapse_label"] = _statement_collapse_label(statement_collapse_stage)
         final_psychological_reaction = norm(progress_eval.get("final_psychological_reaction", ""))
-        judgment_ready = bool(
-            core_fact_exposed
-            or next_turn_count >= MAX_GAME_TURNS
-            or statement_collapse_stage >= 4
-        )
-        if core_fact_exposed or next_turn_count >= MAX_GAME_TURNS:
+        judgment_ready = bool(next_turn_count >= MAX_GAME_TURNS)
+        if next_turn_count >= MAX_GAME_TURNS:
             final_psychological_reaction = _generate_final_psychological_reaction(
                 effective_case_data,
                 statement_collapse_stage,
                 progress_eval["pad_state"],
                 bool(core_fact_exposed),
             )
-        if core_fact_exposed:
+        if next_turn_count >= MAX_GAME_TURNS:
             suspect_text = trim_to_1_3_sentences(
                 build_final_reaction_speech(
                     effective_case_data,
                     statement_collapse_stage,
                     progress_eval["pad_state"],
-                    True,
+                    bool(core_fact_exposed),
                 )
             )
         progress_eval["final_psychological_reaction"] = final_psychological_reaction
