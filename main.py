@@ -2004,7 +2004,7 @@ def build_case_context(
             "[Personality] "
             + " ".join(
                 f"{trait}:{float(personality.get(trait, 0.5)):.2f}"
-                for trait in BIG_FIVE_TRAITS
+                for trait in HEXACO_TRAITS
             )
             + "\n"
         )
@@ -2391,12 +2391,13 @@ async def tts_to_b64(text: str) -> str:
 
     return base64.b64encode(wav_bytes).decode("ascii")
 
-BIG_FIVE_TRAITS = (
-    "openness",
-    "conscientiousness",
+HEXACO_TRAITS = (
+    "honesty_humility",
+    "emotionality",
     "extraversion",
     "agreeableness",
-    "neuroticism",
+    "conscientiousness",
+    "openness_to_experience",
 )
 
 PAD_STATE_FIELDS = (
@@ -2453,7 +2454,7 @@ def _normalize_string_list(values: Any) -> List[str]:
     return []
 
 def _default_personality() -> Dict[str, float]:
-    return {trait: 0.5 for trait in BIG_FIVE_TRAITS}
+    return {trait: 0.5 for trait in HEXACO_TRAITS}
 
 def _default_mental_state() -> Dict[str, float]:
     return {field: 0.5 for field in PAD_STATE_FIELDS}
@@ -2468,23 +2469,23 @@ def _normalize_pad_state_blob(blob: Any) -> Dict[str, float]:
 def _normalize_personality_blob(blob: Any) -> Dict[str, float]:
     raw = blob if isinstance(blob, dict) else {}
     normalized = _default_personality()
-    for trait in BIG_FIVE_TRAITS:
+    for trait in HEXACO_TRAITS:
         normalized[trait] = _to_clamped_float(raw.get(trait, normalized[trait]), normalized[trait])
     return normalized
 
-def _missing_big_five_traits(blob: Any) -> List[str]:
+def _missing_hexaco_traits(blob: Any) -> List[str]:
     raw = blob if isinstance(blob, dict) else {}
-    return [trait for trait in BIG_FIVE_TRAITS if trait not in raw]
+    return [trait for trait in HEXACO_TRAITS if trait not in raw]
 
 def _validate_selected_personality_payload(blob: Any) -> Tuple[Dict[str, float], List[str]]:
-    missing_traits = _missing_big_five_traits(blob)
+    missing_traits = _missing_hexaco_traits(blob)
     if missing_traits:
         return {}, missing_traits
     return _normalize_personality_blob(blob), []
 
 def _normalize_selected_personality_blob(blob: Any) -> Dict[str, float]:
     raw = blob if isinstance(blob, dict) else {}
-    if _missing_big_five_traits(raw):
+    if _missing_hexaco_traits(raw):
         return {}
     return _normalize_personality_blob(raw)
 
@@ -2502,7 +2503,7 @@ def _resolve_selected_personality(
     raw = personality_blob if isinstance(personality_blob, dict) else None
     if raw is None:
         return _selected_personality_from_progress(progress_state)
-    if _missing_big_five_traits(raw):
+    if _missing_hexaco_traits(raw):
         return {}
     return _normalize_personality_blob(raw)
 
@@ -2611,10 +2612,8 @@ def _case_default_personality(case_data: Optional[Dict[str, Any]]) -> Dict[str, 
     if isinstance(suspect_profile, dict):
         if isinstance(suspect_profile.get("default_personality"), dict):
             personality = suspect_profile.get("default_personality", {})
-        elif isinstance(suspect_profile.get("personality"), dict):
-            personality = suspect_profile.get("personality", {})
     normalized = _default_personality()
-    for trait in BIG_FIVE_TRAITS:
+    for trait in HEXACO_TRAITS:
         normalized[trait] = _to_clamped_float(personality.get(trait, normalized[trait]), normalized[trait])
     return normalized
 
@@ -2781,51 +2780,159 @@ def _calculate_personality_response_factors(
     player_intent: str,
 ) -> Dict[str, float]:
     personality = _case_personality(case_data)
-    openness = personality["openness"]
-    conscientiousness = personality["conscientiousness"]
+    honesty_humility = personality["honesty_humility"]
+    emotionality = personality["emotionality"]
     extraversion = personality["extraversion"]
     agreeableness = personality["agreeableness"]
-    neuroticism = personality["neuroticism"]
+    conscientiousness = personality["conscientiousness"]
+    openness_to_experience = personality["openness_to_experience"]
 
-    pressure_multiplier = 1.0 + (0.28 * neuroticism) - (0.18 * conscientiousness)
+    pressure_multiplier = (
+        0.96
+        + (0.30 * emotionality)
+        - (0.16 * conscientiousness)
+        - (0.08 * agreeableness)
+    )
     if player_intent == "Rapport":
-        pressure_multiplier -= 0.12 * agreeableness
+        pressure_multiplier -= 0.12 * max(honesty_humility, agreeableness)
     elif player_intent == "Intimidate":
-        pressure_multiplier += 0.08 + (0.10 * neuroticism)
+        pressure_multiplier += 0.08 + (0.12 * emotionality) - (0.05 * extraversion)
     elif player_intent == "Confront":
-        pressure_multiplier += 0.05 + (0.08 * openness)
+        pressure_multiplier += 0.05 + (0.08 * honesty_humility)
 
     return {
         "pressure_multiplier": max(0.65, min(1.65, pressure_multiplier)),
-        "stress_multiplier": max(0.6, min(1.85, 0.82 + (0.85 * neuroticism) - (0.28 * conscientiousness))),
-        "direct_bonus_multiplier": max(0.72, min(1.6, 0.92 + (0.34 * neuroticism) + (0.12 * agreeableness) - (0.24 * conscientiousness))),
-        "cooperation_shift": max(-0.18, min(0.18, ((agreeableness - 0.5) * 0.18) + ((extraversion - 0.5) * 0.07) - ((neuroticism - 0.5) * 0.08))),
-        "arousal_sensitivity": max(0.72, min(1.95, 0.88 + (0.92 * neuroticism) + (0.16 * openness))),
-        "dominance_resistance": max(0.65, min(1.5, 0.86 + (0.58 * conscientiousness) - (0.18 * agreeableness))),
-        "collapse_resistance": max(0.58, min(1.7, 0.88 + (0.96 * conscientiousness) - (0.34 * neuroticism))),
-        "rapport_affinity": max(0.72, min(1.45, 0.88 + (0.62 * agreeableness))),
-        "reply_length_bias": max(0.62, min(1.65, 0.70 + (0.95 * extraversion))),
-        "rigidity_bias": max(0.65, min(1.55, 1.05 + (0.62 * conscientiousness) - (0.34 * openness))),
-        "friendliness_bias": max(0.6, min(1.55, 0.78 + (0.92 * agreeableness) - (0.12 * neuroticism))),
-        "volatility_bias": max(0.6, min(1.65, 0.80 + (0.78 * neuroticism) - (0.24 * conscientiousness))),
+        "stress_multiplier": max(
+            0.6,
+            min(
+                1.9,
+                0.82
+                + (0.82 * emotionality)
+                - (0.25 * conscientiousness)
+                - (0.10 * extraversion),
+            ),
+        ),
+        "direct_bonus_multiplier": max(
+            0.72,
+            min(
+                1.65,
+                0.88
+                + (0.30 * honesty_humility)
+                + (0.24 * emotionality)
+                - (0.18 * conscientiousness),
+            ),
+        ),
+        "cooperation_shift": max(
+            -0.18,
+            min(
+                0.20,
+                ((honesty_humility - 0.5) * 0.15)
+                + ((agreeableness - 0.5) * 0.16)
+                + ((extraversion - 0.5) * 0.05)
+                - ((emotionality - 0.5) * 0.06),
+            ),
+        ),
+        "arousal_sensitivity": max(
+            0.72,
+            min(
+                1.95,
+                0.86
+                + (0.98 * emotionality)
+                + (0.14 * openness_to_experience),
+            ),
+        ),
+        "dominance_resistance": max(
+            0.62,
+            min(
+                1.55,
+                0.84
+                + (0.38 * conscientiousness)
+                + (0.32 * extraversion)
+                - (0.26 * emotionality)
+                - (0.10 * agreeableness),
+            ),
+        ),
+        "collapse_resistance": max(
+            0.58,
+            min(
+                1.75,
+                0.88
+                + (0.92 * conscientiousness)
+                - (0.34 * emotionality)
+                - (0.18 * honesty_humility),
+            ),
+        ),
+        "rapport_affinity": max(
+            0.72,
+            min(
+                1.5,
+                0.82
+                + (0.50 * honesty_humility)
+                + (0.42 * agreeableness),
+            ),
+        ),
+        "reply_length_bias": max(
+            0.55,
+            min(
+                1.9,
+                0.60
+                + (0.92 * extraversion)
+                + (0.18 * openness_to_experience),
+            ),
+        ),
+        "rigidity_bias": max(
+            0.62,
+            min(
+                1.6,
+                0.96
+                + (0.54 * conscientiousness)
+                + (0.24 * (1.0 - openness_to_experience)),
+            ),
+        ),
+        "friendliness_bias": max(
+            0.58,
+            min(
+                1.6,
+                0.72
+                + (0.78 * agreeableness)
+                + (0.34 * honesty_humility)
+                - (0.16 * emotionality),
+            ),
+        ),
+        "volatility_bias": max(
+            0.58,
+            min(
+                1.7,
+                0.76
+                + (0.72 * emotionality)
+                - (0.24 * conscientiousness)
+                - (0.12 * agreeableness),
+            ),
+        ),
     }
 
 def _build_personality_speaking_directives(case_data: Optional[Dict[str, Any]]) -> List[str]:
     personality = _case_personality(case_data)
-    openness = personality["openness"]
-    conscientiousness = personality["conscientiousness"]
+    honesty_humility = personality["honesty_humility"]
+    emotionality = personality["emotionality"]
     extraversion = personality["extraversion"]
     agreeableness = personality["agreeableness"]
-    neuroticism = personality["neuroticism"]
+    conscientiousness = personality["conscientiousness"]
+    openness_to_experience = personality["openness_to_experience"]
 
     directives: List[str] = [
         "- Make the personality difference obvious on the surface of the reply, not only in hidden state.",
     ]
 
-    if openness >= 0.7:
-        directives.append("- High openness: reframe the situation more readily and reach for alternative angles or side explanations.")
-    elif openness <= 0.3:
-        directives.append("- Low openness: stay rigid and repetitive. Reuse the same denial frame and avoid new angles.")
+    if honesty_humility >= 0.7:
+        directives.append("- High honesty-humility: sound less manipulative and less entitled. Let moral discomfort, shame, or reluctant candor leak through under pressure.")
+    elif honesty_humility <= 0.3:
+        directives.append("- Low honesty-humility: sound more self-serving, calculating, and blame-shifting. Protect yourself first and minimize fault.")
+
+    if emotionality >= 0.7:
+        directives.append("- High emotionality: sound nervous, tense, and easily unsettled. Let fear, strain, and protective hedging show clearly.")
+    elif emotionality <= 0.3:
+        directives.append("- Low emotionality: sound unusually cold, flat, and unsentimental. Avoid nervous hedging and do not sound easily rattled.")
 
     if conscientiousness >= 0.7:
         directives.append("- High conscientiousness: sound careful, controlled, and precise. Keep the wording organized and internally consistent.")
@@ -2838,14 +2945,14 @@ def _build_personality_speaking_directives(case_data: Optional[Dict[str, Any]]) 
         directives.append("- Low extraversion: be visibly clipped. Usually stop after 1 short sentence and avoid voluntary follow-up explanation.")
 
     if agreeableness >= 0.7:
-        directives.append("- High agreeableness: sound softer, more cooperative, and more accommodating. Mild apologies or deference are acceptable.")
+        directives.append("- High agreeableness: sound patient, soft, and non-combative. Even when resisting, avoid snapping and keep the tone civil.")
     elif agreeableness <= 0.3:
-        directives.append("- Low agreeableness: sound curt, prickly, and resistant. Avoid apologetic softeners unless absolutely necessary.")
+        directives.append("- Low agreeableness: sound sharp, argumentative, and easily irritated. Challenge the detective more openly and avoid conciliatory wording.")
 
-    if neuroticism >= 0.7:
-        directives.append("- High neuroticism: show nervousness, hedging, and visible strain under pressure. Let uncertainty markers and verbal wobble appear.")
-    elif neuroticism <= 0.3:
-        directives.append("- Low neuroticism: stay flat, composed, and hard to rattle. Avoid nervous hedging.")
+    if openness_to_experience >= 0.7:
+        directives.append("- High openness to experience: reach for alternative framings, unusual angles, or reinterpretations of what happened.")
+    elif openness_to_experience <= 0.3:
+        directives.append("- Low openness to experience: stay literal, narrow, and repetitive. Reuse the same frame rather than inventing new angles.")
 
     return directives
 
@@ -2883,10 +2990,10 @@ def _build_personality_response_breakdown(
     personality = _case_personality(case_data)
     factors = _calculate_personality_response_factors(case_data, player_intent)
     intent_shift = {
-        "Rapport": "agreeableness lowers pressure and supports cooperation",
+        "Rapport": "honesty-humility and agreeableness make rapport land better",
         "Probe": "neutral factual pressure",
-        "Confront": "openness slightly raises response volatility",
-        "Intimidate": "neuroticism raises pressure and arousal sensitivity",
+        "Confront": "honesty-humility and openness make contradiction pressure bite differently",
+        "Intimidate": "emotionality raises pressure and arousal sensitivity",
         "Neutral": "baseline interpretation",
     }.get(player_intent, "baseline interpretation")
     return {
@@ -2895,11 +3002,11 @@ def _build_personality_response_breakdown(
         "intent_effect": intent_shift,
         "computed_factors": {key: round(value, 3) for key, value in factors.items()},
         "readout": {
-            "pressure": "higher neuroticism increases felt pressure; higher conscientiousness resists it",
-            "cooperation": "agreeableness and extraversion soften cooperation loss",
-            "collapse": "conscientiousness delays collapse, neuroticism accelerates wobble",
-            "pad": "neuroticism pushes arousal up faster, agreeableness lowers dominance under pressure",
-            "speech": "extraversion changes response length, agreeableness changes warmth, openness changes reframing, conscientiousness changes consistency, neuroticism changes shakiness",
+            "pressure": "higher emotionality increases felt pressure; conscientiousness and agreeableness stabilize it",
+            "cooperation": "honesty-humility and agreeableness soften cooperation loss; low honesty-humility increases self-protective resistance",
+            "collapse": "conscientiousness delays collapse, emotionality accelerates wobble, honesty-humility makes concessions leak sooner",
+            "pad": "emotionality pushes arousal up faster, extraversion and conscientiousness help preserve dominance, agreeableness lowers combative dominance",
+            "speech": "extraversion changes response length, agreeableness changes warmth, honesty-humility changes sincerity, emotionality changes shakiness, conscientiousness changes consistency, openness changes reframing",
             "model": "turn pressure accumulates into cumulative_pressure, then sigmoid converts it to breakdown_probability",
         },
     }
@@ -2924,9 +3031,11 @@ def _update_pad_state(
 ) -> Dict[str, float]:
     personality = _case_personality(case_data)
     factors = _calculate_personality_response_factors(case_data, player_intent)
-    neuroticism = personality["neuroticism"]
-    conscientiousness = personality["conscientiousness"]
+    honesty_humility = personality["honesty_humility"]
+    emotionality = personality["emotionality"]
+    extraversion = personality["extraversion"]
     agreeableness = personality["agreeableness"]
+    conscientiousness = personality["conscientiousness"]
 
     pleasure = prior_pad_state.get("pleasure", 0.5)
     arousal = prior_pad_state.get("arousal", 0.5)
@@ -2936,13 +3045,15 @@ def _update_pad_state(
     evidence_impact = 0.02 * float(new_evidence_count)
     soft_impact = 0.02 if soft_dialogue_contradiction else 0.0
 
-    pleasure_delta = -pressure_delta * (0.16 + (0.12 * neuroticism))
-    pleasure_delta -= contradiction_impact * (0.8 - (0.3 * agreeableness))
+    pleasure_delta = -pressure_delta * (0.13 + (0.14 * emotionality))
+    pleasure_delta -= contradiction_impact * (0.74 - (0.22 * agreeableness))
     pleasure_delta -= evidence_impact * 0.5
     if player_intent == "Rapport":
         pleasure_delta += 0.025 * factors["rapport_affinity"]
     elif player_intent == "Intimidate":
         pleasure_delta -= 0.02
+    elif player_intent == "Confront":
+        pleasure_delta -= 0.012 * honesty_humility
     if repeated_question:
         pleasure_delta -= 0.015
 
@@ -2953,8 +3064,9 @@ def _update_pad_state(
     elif player_intent == "Intimidate":
         arousal_delta += 0.015
 
-    dominance_delta = -pressure_delta * (0.22 + (0.18 * agreeableness))
+    dominance_delta = -pressure_delta * (0.18 + (0.18 * emotionality) + (0.10 * agreeableness))
     dominance_delta -= (0.045 * float(new_contradiction_count))
+    dominance_delta += 0.03 * (extraversion - 0.5)
     dominance_delta += 0.02 * (conscientiousness - 0.5)
     if player_intent == "Rapport":
         dominance_delta += 0.01
@@ -2989,8 +3101,8 @@ def _calculate_statement_collapse_stage(
         + (max(0.0, pad_state.get("arousal", 0.5) - 0.55) * 1.8)
         + (max(0.0, 0.45 - pad_state.get("dominance", 0.5)) * 1.6)
         + (max(0.0, 0.45 - pad_state.get("pleasure", 0.5)) * 1.2)
-        + (personality["neuroticism"] * 0.3)
-        + (personality["agreeableness"] * 0.1)
+        + (personality["emotionality"] * 0.32)
+        + (personality["honesty_humility"] * 0.14)
         - (0.75 * factors["collapse_resistance"])
     )
 
@@ -3059,7 +3171,7 @@ def _generate_final_psychological_reaction(
     suspect_profile = case_data.get("suspect_profile", {}) if isinstance(case_data, dict) else {}
     role = norm(suspect_profile.get("case_role", "용의자")) or "용의자"
     personality = _case_personality(case_data)
-    neuroticism = personality["neuroticism"]
+    emotionality = personality["emotionality"]
     conscientiousness = personality["conscientiousness"]
     agreeableness = personality["agreeableness"]
     arousal = pad_state.get("arousal", 0.5)
@@ -3067,7 +3179,7 @@ def _generate_final_psychological_reaction(
     pleasure = pad_state.get("pleasure", 0.5)
 
     if core_fact_exposed or statement_collapse_stage >= 5:
-        if neuroticism >= 0.65:
+        if emotionality >= 0.65:
             return "용의자는 끝내 시선을 피한 채 호흡이 거칠어지고, 더는 기존 진술을 유지하지 못한 채 사실을 털어놓으려는 상태로 무너져 있다."
         if agreeableness >= 0.6:
             return "용의자는 더 버티기 어렵다는 듯 목소리를 낮추고, 일부가 아니라 핵심 사실까지 인정해야 한다는 표정을 보인다."
@@ -3169,7 +3281,6 @@ def coerce_case_payload(case_blob: Any, fallback_case_id: str = "") -> Optional[
     selection_card = case_blob.get("selection_card", {}) if isinstance(case_blob.get("selection_card"), dict) else {}
     suspect_profile = case_blob.get("suspect_profile", {}) if isinstance(case_blob.get("suspect_profile"), dict) else {}
     default_personality = suspect_profile.get("default_personality", {}) if isinstance(suspect_profile.get("default_personality"), dict) else {}
-    legacy_personality = suspect_profile.get("personality", {}) if isinstance(suspect_profile.get("personality"), dict) else {}
     mental_state = suspect_profile.get("mental_state", {}) if isinstance(suspect_profile.get("mental_state"), dict) else {}
     truth_slots = case_blob.get("truth_slots", {}) if isinstance(case_blob.get("truth_slots"), dict) else {}
     evidences = case_blob.get("evidences", []) if isinstance(case_blob.get("evidences"), list) else []
@@ -3237,9 +3348,8 @@ def coerce_case_payload(case_blob: Any, fallback_case_id: str = "") -> Optional[
         return None
 
     normalized_personality = _default_personality()
-    raw_default_personality = default_personality if default_personality else legacy_personality
-    for trait in BIG_FIVE_TRAITS:
-        normalized_personality[trait] = _to_clamped_float(raw_default_personality.get(trait, normalized_personality[trait]))
+    for trait in HEXACO_TRAITS:
+        normalized_personality[trait] = _to_clamped_float(default_personality.get(trait, normalized_personality[trait]))
 
     normalized_mental_state = _default_mental_state()
     for field in PAD_STATE_FIELDS:
@@ -3589,11 +3699,12 @@ def llm_suspect_answer(
         + f"\n[Current behavioral state] {behavior_state}\n"
         + f"[Current statement collapse stage] {statement_collapse_stage} ({collapse_label})\n"
         + (
-            f"[Selected Big Five] openness:{personality['openness']:.2f} "
-            f"conscientiousness:{personality['conscientiousness']:.2f} "
+            f"[Selected HEXACO] honesty_humility:{personality['honesty_humility']:.2f} "
+            f"emotionality:{personality['emotionality']:.2f} "
             f"extraversion:{personality['extraversion']:.2f} "
             f"agreeableness:{personality['agreeableness']:.2f} "
-            f"neuroticism:{personality['neuroticism']:.2f}\n"
+            f"conscientiousness:{personality['conscientiousness']:.2f} "
+            f"openness_to_experience:{personality['openness_to_experience']:.2f}\n"
         )
         + (
             f"[Current PAD state] pleasure:{current_pad_state['pleasure']:.2f} "
@@ -4032,7 +4143,7 @@ async def interrogation_setup(
                 status_code=400,
                 content={
                     "error": "invalid_selected_personality",
-                    "message": "personality_json must be a JSON object with all five Big Five values.",
+                    "message": "personality_json must be a JSON object with all six HEXACO values.",
                 },
             )
         selected_personality, missing_traits = _validate_selected_personality_payload(
@@ -4043,7 +4154,7 @@ async def interrogation_setup(
                 status_code=400,
                 content={
                     "error": "invalid_selected_personality",
-                    "message": "personality_json must include all five Big Five values.",
+                    "message": "personality_json must include all six HEXACO values.",
                     "missing_traits": missing_traits,
                 },
             )
@@ -4530,7 +4641,7 @@ async def interrogation_qna(
                 status_code=400,
                 content={
                     "error": "invalid_selected_personality",
-                    "message": "personality_json must be a JSON object with all five Big Five values.",
+                    "message": "personality_json must be a JSON object with all six HEXACO values.",
                 },
             )
         validated_selected_personality: Dict[str, float] = {}
@@ -4543,7 +4654,7 @@ async def interrogation_qna(
                     status_code=400,
                     content={
                         "error": "invalid_selected_personality",
-                        "message": "personality_json must include all five Big Five values.",
+                        "message": "personality_json must include all six HEXACO values.",
                         "missing_traits": missing_traits,
                     },
                 )

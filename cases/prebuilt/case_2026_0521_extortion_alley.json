@@ -54,11 +54,12 @@
   "suspect_profile": {
     "case_role": "범행과 직접 관련 없음",
     "default_personality": {
-      "openness": 0.5,
-      "conscientiousness": 0.5,
+      "honesty_humility": 0.5,
+      "emotionality": 0.5,
       "extraversion": 0.5,
       "agreeableness": 0.5,
-      "neuroticism": 0.5
+      "conscientiousness": 0.5,
+      "openness_to_experience": 0.5
     },
     "mental_state": {
       "pleasure": 0.5,

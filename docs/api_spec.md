@@ -16,24 +16,26 @@
 ```
 
 ## POST /interrogation/setup
-- Stores the player-selected Big Five values before interrogation starts.
-- `personality_json` must include all 5 traits:
-  - `openness`
-  - `conscientiousness`
+- Stores the player-selected HEXACO values before interrogation starts.
+- `personality_json` must include all 6 traits:
+  - `honesty_humility`
+  - `emotionality`
   - `extraversion`
   - `agreeableness`
-  - `neuroticism`
+  - `conscientiousness`
+  - `openness_to_experience`
 
 ### Request
 ```json
 {
   "case_id": "case_2026_0418_parking",
   "personality_json": {
-    "openness": 0.3,
-    "conscientiousness": 0.8,
+    "honesty_humility": 0.3,
+    "emotionality": 0.7,
     "extraversion": 0.2,
     "agreeableness": 0.4,
-    "neuroticism": 0.7
+    "conscientiousness": 0.8,
+    "openness_to_experience": 0.5
   }
 }
 ```
@@ -46,11 +48,12 @@
   "case_id": "case_2026_0418_parking",
   "user_text": "그 시간에 어디 있었습니까?",
   "personality_json": {
-    "openness": 0.3,
-    "conscientiousness": 0.8,
+    "honesty_humility": 0.3,
+    "emotionality": 0.7,
     "extraversion": 0.2,
     "agreeableness": 0.4,
-    "neuroticism": 0.7
+    "conscientiousness": 0.8,
+    "openness_to_experience": 0.5
   }
 }
 ```
