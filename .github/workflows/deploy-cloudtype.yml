@@ -21,7 +21,7 @@ jobs:
           stage: main
           yaml: |
             name: unserver
-            app: python@3.9
+            app: python@3.12
             options:
               env:
                 - name: OPENAI_API_KEY
