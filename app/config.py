@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+from typing import Union
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 RUNTIME_STORE_DIR = ROOT_DIR / "runtime_store"
@@ -7,7 +8,7 @@ CASE_STORE_DIR = RUNTIME_STORE_DIR / "cases"
 PREBUILT_CASE_DIR = ROOT_DIR / "cases" / "prebuilt"
 
 
-def load_env(path: Path | str = ROOT_DIR / ".env") -> None:
+def load_env(path: Union[Path, str] = ROOT_DIR / ".env") -> None:
     env_path = Path(path)
     if env_path.exists():
         with env_path.open("r", encoding="utf-8") as f:
