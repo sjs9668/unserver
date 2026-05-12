@@ -1,3 +1,5 @@
+"""텍스트 정규화와 간단한 판정 유틸리티."""
+
 import re
 from typing import Any, Dict, List
 
@@ -10,12 +12,14 @@ def safe_float(value: Any, default: float = 0.0) -> float:
 
 
 def norm(s: str) -> str:
+    """앞뒤 공백과 연속 공백을 정리해 비교/저장에 쓰기 좋게 만든다."""
     s = (s or "").strip()
     s = re.sub(r"\s+", " ", s)
     return s
 
 
 def norm_for_match(s: str) -> str:
+    """대소문자와 특수문자 차이를 제거해 느슨한 포함 비교에 사용한다."""
     s = (s or "").strip().lower()
     return re.sub(r"[\W_]+", "", s, flags=re.UNICODE)
 
@@ -49,6 +53,7 @@ def is_too_ambiguous(user_text: str) -> bool:
 
 
 def detect_repeat(history: List[Dict[str, Any]], user_text: str) -> bool:
+    """최근 질문과 완전히 같은 질문이면 반복 질문으로 간주한다."""
     t = norm(user_text)
     if not history:
         return False

@@ -1,3 +1,15 @@
+"""심문 API 전체 흐름을 조율하는 오케스트레이션 서비스.
+
+한 턴의 처리 순서:
+1. 음성 입력이 있으면 STT로 질문 텍스트 변환
+2. 사건 데이터와 이전 심문 진행 상태 로드
+3. 질문 의도/대상 슬롯/증거 언급/압박 수준 분석
+4. NPC 답변 생성
+5. 하드 모순(사건 데이터 충돌)과 소프트 모순(대화 중 진술 변화) 판정
+6. 압박, PAD 감정 상태, 진술 붕괴 단계, 최종 심리 반응 갱신
+7. 진술 기록을 저장하고 TTS 음성을 포함해 클라이언트에 반환
+"""
+
 import os
 import traceback
 import re
@@ -30,16 +42,17 @@ from app.utils.text import (
 # =========================================================
 from app.storage.progress_store import INTERROGATION_PROGRESS_CACHE
 
-# Final server shape:
-# - cases come from prebuilt JSON files
-# - the interrogation engine is still the existing server-side flow
-#   (question analysis -> suspect answer -> contradiction detection -> scoring)
-# - documents / personality / PAD are extra case metadata for briefing and UI linkage
+# 최종 서버 구조:
+# - 사건은 LLM 즉석 생성이 아니라 cases/prebuilt의 사전 제작 JSON을 사용한다.
+# - 심문 엔진은 질문 분석 -> 답변 생성 -> 모순 판정 -> 압박/붕괴 계산 순서로 동작한다.
+# - documents/personality/PAD는 브리핑 UI와 심리 모델 계산에 연결되는 메타데이터다.
 
 def normalize_progress_state(blob: Any) -> Dict[str, Any]:
     from app.schemas.interrogation import normalize_progress_state as _impl
     return _impl(blob)
 
+# 질문 자체의 압박 강도. 증거/모순보다 작은 보정값으로 두어,
+# 발표 내용처럼 "모순을 동반한 압박"이 더 크게 작동하게 한다.
 PRESSURE_LEVEL_BONUS = {
     "none": 0.0,
     "low": 0.005,
@@ -54,6 +67,9 @@ REPEATED_CONTRADICTION_PRESSURE_DELTA = 0.04
 MAX_TURN_PRESSURE_DELTA = 0.22
 MAX_GAME_TURNS = 10
 BREAKDOWN_EXPOSURE_THRESHOLD = 0.85
+
+# 누적 압박을 Sigmoid에 넣을 때 사용하는 기울기와 임계점.
+# midpoint 근처를 넘으면 붕괴 확률이 빠르게 올라간다.
 STRESS_IDLE_DECAY = 0.01
 STRESS_WEAK_TURN_DECAY = 0.003
 STRESS_REPEAT_DECAY = 0.01
@@ -77,6 +93,8 @@ VALID_CONTRADICTION_TYPES = {
 LEGACY_CONFESSION_COMPAT_THRESHOLD = BREAKDOWN_EXPOSURE_THRESHOLD
 EXPOSURE_FSM_STATE = "Breakdown / Core Fact Exposure"
 
+# 소프트 모순은 사건 데이터와 직접 충돌하지 않아도 진술이 흔들린 신호이므로
+# 압박과 붕괴 진행에 별도 보너스를 준다.
 DIALOGUE_CONTRADICTION_PRESSURE_BONUS = {
     "detective_highlighted": {
         "none": 0.0,
@@ -665,6 +683,7 @@ def _classify_question_category(
     question_analysis: Optional[Dict[str, Any]],
     repeated_question: bool = False,
 ) -> Dict[str, str]:
+    """LLM 질문 분석 결과를 발표 자료의 질문 유형 라벨로 변환한다."""
     analysis = question_analysis or {}
     intent = norm(analysis.get("intent", "")).lower()
     pressure_level = norm(analysis.get("pressure_level", "")).lower()
@@ -699,6 +718,7 @@ def _sanitize_question_analysis(
     case_data: Optional[Dict[str, Any]],
     raw_signal: Dict[str, Any],
 ) -> Dict[str, Any]:
+    """LLM 구조화 결과가 서버 허용 범위를 벗어나지 않도록 보정한다."""
     valid_evidence_ids = {
         str(e.get("id", "")).strip() for e in _case_evidences(case_data) if e.get("id")
     }
@@ -833,6 +853,7 @@ def _backfill_question_analysis(
     user_text: str,
     analysis: Dict[str, Any],
 ) -> Dict[str, Any]:
+    """LLM이 놓친 슬롯/증거/압박 단서를 로컬 키워드 규칙으로 보강한다."""
     backfilled = dict(analysis or {})
     lexical_slot = _detect_slot_from_text(user_text)
     lexical_evidence_ids = _lexical_evidence_hits(case_data, user_text)
@@ -933,6 +954,7 @@ def _fallback_question_analysis(
     history: List[Dict[str, Any]],
     user_text: str,
 ) -> Dict[str, Any]:
+    """LLM 질문 분석 실패 시에도 게임이 멈추지 않도록 로컬 규칙으로 분석한다."""
     if not case_data:
         return _empty_question_analysis("case unavailable")
 
@@ -1087,6 +1109,7 @@ def build_case_context(
     case_data: Optional[Dict[str, Any]],
     include_hidden_truth: bool = False,
 ) -> str:
+    """NPC 답변 생성 프롬프트에 넣을 사건 브리핑 문자열을 만든다."""
     if not case_data:
         return "No case data.\n"
 
@@ -1564,6 +1587,7 @@ def _resolve_case_from_request(
     case_id: str,
     case_json: str = "",
 ) -> Tuple[str, Optional[Dict[str, Any]], Optional[Dict[str, Any]], int]:
+    """요청의 case_id 또는 case_json으로 이번 심문에 사용할 사건 데이터를 찾는다."""
     resolved_case_id = norm(case_id)
     raw_case_json = case_json or ""
     if not resolved_case_id and not raw_case_json.strip():
@@ -1614,6 +1638,7 @@ async def interrogation_setup(
     personality_json: str = Form(""),
     reset_progress: str = Form(""),
 ):
+    """심문 시작 전 플레이어가 선택한 NPC HEXACO 성향을 진행 상태에 저장한다."""
     try:
         resolved_case_id, case_data, error_content, status_code = _resolve_case_from_request(case_id, case_json)
         if error_content:
@@ -1689,6 +1714,7 @@ async def interrogation_judgment_submit(
     judgment: str = Form(""),
     notes: str = Form(""),
 ):
+    """심문 종료 후 플레이어의 최종 판단을 저장하고 실제 정답과 비교한다."""
     try:
         resolved_case_id, case_data, error_content, status_code = _resolve_case_from_request(case_id, case_json)
         if error_content:
@@ -1750,6 +1776,7 @@ async def interrogation_report(
     case_id: str = Form(""),
     case_json: str = Form(""),
 ):
+    """현재까지의 진술 기록과 최종 심리 리포트를 반환한다."""
     try:
         resolved_case_id, case_data, error_content, status_code = _resolve_case_from_request(case_id, case_json)
         if error_content:
@@ -1781,6 +1808,7 @@ async def interrogation_result_reveal(
     case_id: str = Form(""),
     case_json: str = Form(""),
 ):
+    """플레이어 판단 이후 사건 파일에 저장된 실제 역할을 공개한다."""
     try:
         resolved_case_id, case_data, error_content, status_code = _resolve_case_from_request(case_id, case_json)
         if error_content:
@@ -1827,6 +1855,7 @@ async def interrogation_debug_confess(
     history_json: str = Form("[]"),
     user_text: str = Form(""),
 ):
+    """시연/디버그용으로 강제 붕괴 상태를 만들어 응답을 확인하는 엔드포인트."""
     try:
         history = safe_json_loads(history_json, [])
         if not isinstance(history, list):
@@ -2014,28 +2043,30 @@ async def interrogation_qna(
     reset_progress: str = Form(""),
 ):
     """
+    플레이어의 한 턴 질문을 처리하는 핵심 엔드포인트.
+
     Request(Form-data):
-      - file: wav (optional)
-      - user_text: text (optional, file 없을 때만 사용)
-      - case_id: string  (/case/generate 로 받은 값)
-      - history_json: JSON string (list)
+      - file: wav (선택, 음성 질문)
+      - user_text: text (선택, 파일이 없을 때 직접 질문)
+      - case_id/case_json: 심문할 사건
+      - personality_json: 선택된 HEXACO 성향
+      - history_json: 이전 대화 기록
 
     Response(JSON):
-      - user_text
-      - suspect_text
-      - pressure_delta
-      - breakdown_probability
-      - core_fact_exposed
+      - user_text / suspect_text
+      - question_category
+      - pressure_delta / cumulative_pressure / breakdown_probability
+      - statement_collapse_stage / pad_state / final_psychological_report
       - audio_wav_b64
     """
     try:
-        # 0) history
+        # 0) 클라이언트가 보내 준 최근 대화 기록을 정리한다.
         history = safe_json_loads(history_json, [])
         if not isinstance(history, list):
             history = []
         history = history[-20:]  # 너무 길면 토큰/비용 폭발 방지
 
-        # 1) 입력 텍스트(STT or direct)
+        # 1) 입력 질문 확보: 음성 파일이 있으면 STT, 없으면 user_text를 사용한다.
         final_user_text = (user_text or "").strip()
         if file is not None:
             audio_bytes = await file.read()
@@ -2054,6 +2085,7 @@ async def interrogation_qna(
                 status_code=400,
                 content={"error": "missing_case_context"},
             )
+        # 2) 사건 데이터 확보: case_json이 오면 정규화해 저장하고, 아니면 case_id로 로드한다.
         case_data = None
         client_case_payload = safe_json_loads(case_json, None) if case_json.strip() else None
         client_case_data = coerce_case_payload(client_case_payload, case_id)
@@ -2096,6 +2128,7 @@ async def interrogation_qna(
             )
         if case_id and is_truthy_string(reset_progress):
             INTERROGATION_PROGRESS_CACHE.pop(case_id, None)
+        # 3) 이전 턴까지 누적된 압박/모순/PAD/진술 기록을 불러온다.
         prior_progress = _get_progress_state(case_id)
         prior_breakdown_probability = float(
             prior_progress.get("breakdown_probability", 0.0)
@@ -2124,6 +2157,8 @@ async def interrogation_qna(
         prior_final_psychological_report = _normalize_final_report_blob(
             prior_progress.get("final_psychological_report", {})
         )
+        # 4) NPC 성향은 심문 시작 전 고정값이다. 요청값이 있으면 검증하고,
+        # 없으면 setup 단계에서 저장된 selected_personality를 사용한다.
         client_personality_payload = safe_json_loads(personality_json, None) if personality_json.strip() else None
         if personality_json.strip() and not isinstance(client_personality_payload, dict):
             return JSONResponse(
@@ -2164,6 +2199,7 @@ async def interrogation_qna(
                     "message": "Select NPC personality before starting interrogation. Send personality_json to /interrogation/setup or include it in /interrogation/qna.",
                 },
             )
+        # 선택된 HEXACO 성향을 사건 복사본에 반영해 이후 모든 계산과 답변 생성에 사용한다.
         effective_case_data = _effective_case_from_progress(
             case_data,
             prior_progress,
@@ -2179,6 +2215,7 @@ async def interrogation_qna(
             or prior_breakdown_probability >= BREAKDOWN_EXPOSURE_THRESHOLD
         )
 
+        # 최대 턴 수를 넘으면 추가 심문 대신 판단 단계로 넘어가도록 고정 응답을 보낸다.
         if prior_turn_count >= MAX_GAME_TURNS:
             msg = "이미 이번 심문은 종료됐습니다."
             return JSONResponse(
@@ -2257,8 +2294,7 @@ async def interrogation_qna(
                 },
             )
 
-        # 2) case load (cache 우선)
-        # 3) calc pressure/prob
+        # 5) 질문 분석: 자유 발화 질문을 의도, 대상 슬롯, 증거 언급, 압박 수준으로 구조화한다.
         question_analysis = llm_evaluate_interrogation(effective_case_data, history, final_user_text)
         repeated_question = detect_repeat(history, final_user_text)
         question_category = _classify_question_category(
@@ -2269,7 +2305,7 @@ async def interrogation_qna(
         core_fact_exposed = bool(prior_core_fact_exposed)
         current_behavior_state = norm(prior_progress.get("fsm_state", DEFAULT_FSM_STATE)) or DEFAULT_FSM_STATE
 
-        # 4) LLM answer
+        # 6) NPC 답변 생성: 사건 브리핑, HEXACO, PAD, 붕괴 단계, 질문 분석 결과를 프롬프트에 반영한다.
         suspect_text = llm_suspect_answer(
             suspect_case_context,
             effective_case_data,
@@ -2282,6 +2318,7 @@ async def interrogation_qna(
             prior_pad_state,
         )
 
+        # 7) 모순 판정: 하드 모순은 사건 데이터 룰 기반, 소프트 모순은 최근 진술 변화 기반이다.
         suspect_text = trim_to_1_3_sentences(suspect_text)
         rule_based_turn = analyze_interrogation_turn_rule_based(
             effective_case_data,
@@ -2300,6 +2337,7 @@ async def interrogation_qna(
             or dialogue_contradiction_signal.get("suspect_self_contradicted")
         ) and str(dialogue_contradiction_signal.get("severity", "none")).strip().lower() != "none"
         rule_based_turn["soft_dialogue_contradiction_signal"] = dialogue_contradiction_signal
+        # 8) 압박/심리/붕괴 계산: 모순과 증거 누적값을 PAD와 붕괴 확률로 변환한다.
         progress_eval = evaluate_interrogation_progress_v3(
             effective_case_data,
             history,
@@ -2337,7 +2375,7 @@ async def interrogation_qna(
             progress_eval["breakdown_probability"] = breakdown_probability
             progress_eval["core_fact_exposed"] = True
 
-        # 5) TTS
+        # 9) TTS: 클라이언트가 바로 재생할 수 있도록 NPC 답변을 WAV base64로 반환한다.
         wav_b64 = await tts_to_b64(suspect_text)
         next_turn_count = prior_turn_count + 1
         progress_eval["pad_state"] = _normalize_pad_state_blob(
@@ -2351,6 +2389,7 @@ async def interrogation_qna(
         progress_eval["statement_collapse_label"] = _statement_collapse_label(statement_collapse_stage)
         final_psychological_reaction = norm(progress_eval.get("final_psychological_reaction", ""))
         judgment_ready = bool(next_turn_count >= MAX_GAME_TURNS)
+        # 10턴에 도달하면 최종 심리 반응을 계산하고, 플레이어 판단 버튼을 활성화한다.
         if next_turn_count >= MAX_GAME_TURNS:
             final_psychological_reaction = _generate_final_psychological_reaction(
                 effective_case_data,
@@ -2368,6 +2407,7 @@ async def interrogation_qna(
                 )
             )
         progress_eval["final_psychological_reaction"] = final_psychological_reaction
+        # 10) 이번 턴 질문/답변/핵심 주장/모순/PAD 상태를 진술 기록에 추가한다.
         statement_record = _build_statement_record(
             next_turn_count,
             final_user_text,
@@ -2398,6 +2438,7 @@ async def interrogation_qna(
             "submitted_judgment": prior_submitted_judgment,
             "turn_count": next_turn_count,
         }
+        # 11) 최종 판단 화면에서 보여 줄 심리 리포트를 최신 진행 상태 기준으로 갱신한다.
         final_psychological_report = _build_final_psychological_report(
             effective_case_data,
             post_progress_state,
@@ -2423,6 +2464,7 @@ async def interrogation_qna(
             final_psychological_report,
         )
 
+        # 12) Unreal 클라이언트가 UI와 음성을 갱신할 수 있도록 한 번에 응답한다.
         response_content = {
             "user_text": final_user_text,
             "question_category": question_category["key"],
@@ -2445,6 +2487,7 @@ async def interrogation_qna(
             "turn_count": next_turn_count,
             "audio_wav_b64": wav_b64,
         }
+        # 디버그 응답은 통계 분석과 시연 검증용으로 압박 세부 항목까지 포함한다.
         if debug_enabled:
             response_content["debug"] = {
                 "signal_guide": {

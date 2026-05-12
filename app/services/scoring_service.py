@@ -1,3 +1,10 @@
+"""심문 압박, 붕괴 확률, PAD 감정 상태를 계산하는 서비스.
+
+이 모듈은 발표의 핵심 로직인 "증거/모순/질문 강도 -> 누적 압박 ->
+Sigmoid 붕괴 확률 -> 진술 붕괴 단계/PAD 변화"를 담당한다.
+HEXACO 성향은 고정값으로 읽어 압박 민감도, 협조도, 말 길이, 붕괴 저항에 반영한다.
+"""
+
 import math
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -44,6 +51,8 @@ from app.services.interrogation_service import (
 )
 
 class InterrogationCore:
+    """심문 진행의 핵심 수학 모델을 묶은 클래스."""
+
     def __init__(
         self,
         pressure_steepness: float = PRESSURE_SIGMOID_STEEPNESS,
@@ -51,6 +60,8 @@ class InterrogationCore:
     ):
         self.w = pressure_steepness
         self.midpoint = pressure_midpoint
+        # SUE(Strategic Use of Evidence) 효과: 구체적이고 출처가 강한 증거일수록
+        # 모순을 지적했을 때 심리적 압박이 크게 작동하도록 가중치를 둔다.
         self.sue_matrix = {
             "low_spec_low_src": 0.5,
             "low_spec_high_src": 1.2,
@@ -66,12 +77,14 @@ class InterrogationCore:
         self,
         cumulative_pressure: float,
     ) -> float:
+        """누적 압박을 Sigmoid에 넣기 전 원시 점수로 변환한다."""
         return self.w * (clamp01(cumulative_pressure) - self.midpoint)
 
     def calculate_breakdown_probability(
         self,
         cumulative_pressure: float,
     ) -> Tuple[float, float]:
+        """누적 압박을 0~1 사이의 진술 붕괴 확률로 변환한다."""
         sigmoid_input = max(-60.0, min(60.0, self.calculate_raw_odds(cumulative_pressure)))
         p_breakdown = 1.0 / (1.0 + math.exp(-sigmoid_input))
         return sigmoid_input, clamp01(p_breakdown)
@@ -84,6 +97,7 @@ class InterrogationCore:
         cooperation: float,
         latest_sue_impact: float = 0.0,
     ) -> str:
+        """붕괴 확률과 협조도를 바탕으로 NPC의 현재 행동 상태를 정한다."""
         if p_breakdown >= BREAKDOWN_EXPOSURE_THRESHOLD:
             return EXPOSURE_FSM_STATE
         if (
@@ -204,6 +218,7 @@ def _calculate_latest_sue_impact(
     contradiction_ids: List[str],
     core: InterrogationCore,
 ) -> float:
+    """이번 턴에 언급된 증거와 모순의 SUE 압박 효과를 계산한다."""
     if not case_data or not contradiction_ids:
         return 0.0
 
@@ -252,6 +267,7 @@ def _update_cooperation_score(
     history: List[Dict[str, Any]],
     user_text: str,
 ) -> float:
+    """플레이어 질문 태도와 모순 제시 결과에 따라 NPC 협조도를 갱신한다."""
     cooperation = clamp01(prior_cooperation)
     intent_delta = {
         "Rapport": 0.03,
@@ -277,6 +293,7 @@ def _update_stress_score(
     history: List[Dict[str, Any]],
     user_text: str,
 ) -> float:
+    """이번 턴 압박이 NPC 스트레스에 얼마나 누적되는지 계산한다."""
     stress_delta = pressure_delta
 
     if not current_contradiction_ids and not current_evidence_ids:
@@ -293,6 +310,7 @@ def _update_stress_score(
 def _dialogue_contradiction_bonus_values(
     dialogue_signal: Optional[Dict[str, Any]],
 ) -> Tuple[float, float, bool]:
+    """소프트 모순 신호를 압박 보너스와 붕괴 보너스로 변환한다."""
     if not isinstance(dialogue_signal, dict):
         return 0.0, 0.0, False
 
@@ -337,6 +355,7 @@ def evaluate_interrogation_progress_v3(
     contradiction_ids: Optional[List[str]] = None,
     dialogue_contradiction_signal: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    """한 턴의 질문/답변/모순 결과를 종합해 심문 진행 상태를 갱신한다."""
     if not case_data:
         return {
             "pressure_delta": 0.0,
@@ -403,6 +422,8 @@ def evaluate_interrogation_progress_v3(
         if str(cid).strip()
     }
 
+    # 현재 턴에서 새로 제시된 증거/모순과 이미 누적된 증거/모순을 분리한다.
+    # 새 모순은 반복 증거보다 더 큰 압박을 주도록 별도 가중치를 적용한다.
     current_evidence_ids = {
         str(eid).strip()
         for eid in (signal.get("mentioned_evidence_ids", []) or [])
@@ -445,6 +466,8 @@ def evaluate_interrogation_progress_v3(
         + REPEATED_CONTRADICTION_PRESSURE_DELTA * len(repeated_contradiction_ids)
     )
     pressure_level_bonus = PRESSURE_LEVEL_BONUS.get(pressure_level, 0.0)
+    # 압박은 증거, 하드 모순, 소프트 모순, 질문 강도로 나누어 계산한다.
+    # 이후 debug 응답에서 각 항목을 보여 주면 통계/발표용 분석에 활용할 수 있다.
     pressure_components = {
         "evidence": evidence_pressure * personality_response_factors["pressure_multiplier"],
         "hard_contradiction": hard_contradiction_pressure * personality_response_factors["pressure_multiplier"],
@@ -501,6 +524,8 @@ def evaluate_interrogation_progress_v3(
     cooperation_score = clamp01(
         cooperation_score + personality_response_factors["cooperation_shift"]
     )
+    # PAD는 실시간 감정 상태다. HEXACO는 고정 성향이고,
+    # PAD는 이번 턴의 압박과 모순으로 계속 변한다.
     pad_state = _update_pad_state(
         prior_pad_state,
         case_data,
@@ -545,6 +570,8 @@ def evaluate_interrogation_progress_v3(
         pressure_delta + progression_pressure + sue_pressure + dialogue_breakdown_bonus,
     )
     cumulative_pressure = clamp01(prior_cumulative_pressure + turn_cumulative_pressure_gain)
+    # 누적 압박은 Sigmoid를 통과해 붕괴 확률이 된다.
+    # 초반엔 변화가 작고 임계점 이후 급격히 흔들리는 패턴을 표현한다.
     raw_odds, breakdown_probability = core.calculate_breakdown_probability(
         cumulative_pressure
     )
@@ -636,6 +663,7 @@ def _calculate_personality_response_factors(
     case_data: Optional[Dict[str, Any]],
     player_intent: str,
 ) -> Dict[str, float]:
+    """HEXACO 성향을 게임 계산에 쓰는 배율/보정값으로 변환한다."""
     personality = _case_personality(case_data)
     honesty_humility = personality["honesty_humility"]
     emotionality = personality["emotionality"]
@@ -814,6 +842,7 @@ def _update_pad_state(
     soft_dialogue_contradiction: bool,
     repeated_question: bool,
 ) -> Dict[str, float]:
+    """압박과 모순이 PAD 세 축(안정도, 긴장도, 주도권)에 미치는 변화를 계산한다."""
     personality = _case_personality(case_data)
     factors = _calculate_personality_response_factors(case_data, player_intent)
     honesty_humility = personality["honesty_humility"]
@@ -875,6 +904,7 @@ def _calculate_statement_collapse_stage(
     pad_state: Dict[str, float],
     case_data: Optional[Dict[str, Any]],
 ) -> int:
+    """누적 압박, 모순 수, PAD 상태, HEXACO를 합산해 0~5 붕괴 단계를 산출한다."""
     personality = _case_personality(case_data)
     factors = _calculate_personality_response_factors(case_data, "Neutral")
     collapse_signal = (
@@ -912,6 +942,7 @@ def _soft_dialogue_stage_floor(
     pad_state: Dict[str, float],
     repeated_question: bool,
 ) -> int:
+    """소프트 모순이 잡혔을 때 최소 붕괴 단계를 보장한다."""
     signal = dialogue_contradiction_signal or {}
     severity = str(signal.get("severity", "none")).strip().lower()
     if severity not in {"low", "medium", "high"}:

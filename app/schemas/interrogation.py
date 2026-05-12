@@ -1,3 +1,10 @@
+"""심문 진행 상태와 응답 데이터의 표준 스키마 보조 함수.
+
+서버는 매 턴마다 질문 분석, 진술 기록, PAD 상태, 붕괴 단계, 최종 판단 정보를
+JSON으로 주고받는다. 이 모듈은 클라이언트나 캐시에 남은 값이 불완전해도
+게임 로직이 항상 같은 형태의 데이터를 사용하도록 정규화한다.
+"""
+
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -8,6 +15,7 @@ DEFAULT_FSM_STATE = "Idle / Evasion"
 BREAKDOWN_EXPOSURE_THRESHOLD = 0.85
 MAX_GAME_TURNS = 10
 
+# 사건 파일과 질문 분석에서 사용하는 핵심 사실 슬롯.
 TRUTH_SLOT_NAMES = [
     "crime_time",
     "crime_place",
@@ -19,6 +27,7 @@ TRUTH_SLOT_NAMES = [
     "met_victim_that_day",
 ]
 
+# LLM 질문 분석이 반환할 수 있는 의도 목록.
 QUESTION_INTENTS = [
     "ask_time",
     "ask_place",
@@ -34,6 +43,7 @@ QUESTION_INTENTS = [
     "irrelevant",
 ]
 
+# 질문 분석 결과를 JSON Schema로 고정해 서버 로직이 예측 가능한 입력을 받게 한다.
 QUESTION_ANALYSIS_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
@@ -75,6 +85,7 @@ QUESTION_ANALYSIS_SCHEMA = {
 InterrogationProgress = Dict[str, Any]
 StatementRecords = List[Dict[str, Any]]
 
+# 발표 자료의 질문 유형 분류와 UI 표시용 라벨.
 QUESTION_CATEGORY_LABELS = {
     "basic_fact": "기본 사실 질문",
     "statement_lock": "진술 고정 질문",
@@ -84,6 +95,7 @@ QUESTION_CATEGORY_LABELS = {
     "misc": "기타 질문",
 }
 
+# HEXACO는 게임 시작 전에 고정되는 성향, PAD는 턴마다 갱신되는 감정 상태다.
 HEXACO_TRAITS = (
     "honesty_humility",
     "emotionality",
@@ -202,6 +214,7 @@ def _resolve_selected_personality(
     return _normalize_personality_blob(raw)
 
 def _normalize_statement_record(record: Any, classify_question_category: Any = None) -> Dict[str, Any]:
+    """한 턴의 질문/답변/모순/심리 상태 기록을 표준 형태로 정리한다."""
     raw = record if isinstance(record, dict) else {}
     try:
         turn_index = int(raw.get("turn_index", 0) or 0)
@@ -258,6 +271,7 @@ def _normalize_statement_record(record: Any, classify_question_category: Any = N
     }
 
 def _normalize_statement_records(values: Any, classify_question_category: Any = None) -> List[Dict[str, Any]]:
+    """진술 기록은 너무 커지지 않도록 최근 MAX_STATEMENT_RECORDS개만 유지한다."""
     if not isinstance(values, list):
         return []
     records = [_normalize_statement_record(value, classify_question_category) for value in values]
@@ -304,6 +318,7 @@ def _normalize_final_report_blob(blob: Any) -> Dict[str, Any]:
     }
 
 def normalize_progress_state(blob: Any) -> Dict[str, Any]:
+    """캐시에 저장된 심문 진행 상태를 서버 내부 표준값으로 정규화한다."""
     if not isinstance(blob, dict):
         return {}
 
@@ -370,6 +385,7 @@ def _build_final_psychological_report(
     case_data: Optional[Dict[str, Any]],
     progress_state: Optional[Dict[str, Any]],
 ) -> Dict[str, Any]:
+    """심문 종료 후 플레이어 판단에 참고할 최종 심리 리포트를 만든다."""
     from app.schemas.case import _effective_case_from_progress, _case_personality
 
     progress = normalize_progress_state(progress_state or {})
@@ -429,6 +445,7 @@ def _build_statement_record(
     repeated_question: bool = False,
     classify_question_category: Any = None,
 ) -> Dict[str, Any]:
+    """이번 턴의 질문 의도, NPC 답변, 핵심 주장, 모순, PAD 상태를 저장한다."""
     stage = max(0, min(5, int(safe_float(progress_eval.get("statement_collapse_stage", 0), 0.0))))
     if callable(classify_question_category):
         question_category = classify_question_category(
@@ -480,6 +497,7 @@ def _generate_final_psychological_reaction(
     pad_state: Dict[str, float],
     core_fact_exposed: bool,
 ) -> str:
+    """진술 붕괴 단계와 PAD 상태를 바탕으로 NPC의 마지막 심리 반응을 설명한다."""
     suspect_profile = case_data.get("suspect_profile", {}) if isinstance(case_data, dict) else {}
     role = norm(suspect_profile.get("case_role", "용의자")) or "용의자"
     from app.schemas.case import _case_personality
@@ -522,6 +540,7 @@ def build_final_reaction_speech(
     pad_state: Dict[str, float],
     core_fact_exposed: bool,
 ) -> str:
+    """10턴 종료 시 NPC가 직접 말하는 짧은 최종 반응 문장을 만든다."""
     from app.schemas.case import _case_personality
 
     personality = _case_personality(case_data)

@@ -1,3 +1,10 @@
+"""OpenAI API를 사용하는 음성/언어 생성 서비스.
+
+STT는 플레이어 음성을 텍스트 질문으로 바꾸고, LLM은 질문 분석과 NPC 답변 생성을
+돕는다. 단, 사건 데이터와 직접 충돌하는 하드 모순 판정은 LLM이 아니라
+contradiction_service의 룰 기반 로직이 담당한다.
+"""
+
 import base64
 import json
 from io import BytesIO
@@ -38,6 +45,7 @@ def llm_evaluate_interrogation(
     history: List[Dict[str, Any]],
     user_text: str,
 ) -> Dict[str, Any]:
+    """자유 발화 질문을 서버가 계산 가능한 질문 의도/슬롯/증거/압박값으로 구조화한다."""
     if not case_data:
         return _empty_question_analysis("case unavailable")
 
@@ -58,6 +66,8 @@ def llm_evaluate_interrogation(
         "current_detective_text": norm(user_text),
     }
 
+    # LLM은 자연어 구조화 보조 역할만 맡는다.
+    # 실제 모순 ID 결정과 거짓말 판정은 서버의 사건 데이터 기반 로직에서 처리한다.
     system = (
         "You analyze the detective's latest question in a free-form voice interrogation game.\n"
         "Return only JSON matching the schema.\n"
@@ -138,6 +148,7 @@ def stt_transcribe(audio_bytes: bytes) -> str:
 # TTS
 # =========================================================
 async def tts_to_b64(text: str) -> str:
+    """NPC 답변 텍스트를 WAV 음성으로 합성해 base64 문자열로 반환한다."""
     text = (text or "").strip()
     if not text:
         return ""
@@ -162,6 +173,7 @@ async def tts_to_b64(text: str) -> str:
     return base64.b64encode(wav_bytes).decode("ascii")
 
 def _build_personality_speaking_directives(case_data: Optional[Dict[str, Any]]) -> List[str]:
+    """HEXACO 성향을 LLM이 말투로 표현할 수 있는 프롬프트 지시문으로 변환한다."""
     personality = _case_personality(case_data)
     honesty_humility = personality["honesty_humility"]
     emotionality = personality["emotionality"]
@@ -212,6 +224,7 @@ def _postprocess_reply_by_personality(
     pressure_level: str,
     has_current_contradiction: bool,
 ) -> str:
+    """외향성/압박 수준에 맞춰 생성 답변의 길이를 후처리한다."""
     out = trim_to_1_3_sentences(text)
     sentences = _split_short_sentences(out)
     if not sentences:
@@ -302,6 +315,7 @@ def _build_turn_pressure_context_v2(
     case_data: Optional[Dict[str, Any]],
     interrogation_signal: Optional[Dict[str, Any]],
 ) -> str:
+    """이번 턴의 증거 제시와 압박 수준을 NPC 답변 프롬프트에 넣을 문맥으로 만든다."""
     if not case_data or not interrogation_signal:
         return ""
 
@@ -362,6 +376,7 @@ def _build_turn_pressure_context_v2(
     )
 
 def _build_suspect_answer_system_prompt() -> str:
+    """NPC 답변 생성 전체에 적용되는 기본 역할/금지 규칙 프롬프트."""
     return (
         "You are a suspect being interrogated by a detective.\n"
         "Reply in natural spoken Korean using polite speech (존댓말) every turn.\n"
@@ -398,6 +413,7 @@ def llm_suspect_answer(
     statement_collapse_stage: int = 0,
     pad_state: Optional[Dict[str, float]] = None,
 ) -> str:
+    """NPC 성향, PAD, 붕괴 단계, 최신 질문을 반영해 용의자 답변을 생성한다."""
     system = _build_suspect_answer_system_prompt()
     recent = history[-4:] if isinstance(history, list) else []
     hist_lines: List[str] = []
@@ -415,6 +431,8 @@ def llm_suspect_answer(
 
     detective_mentions.append(user_text)
 
+    # 플레이어가 아직 제시하지 않은 증거를 NPC가 먼저 말하지 않도록
+    # 최근 형사 발화에서 언급된 증거 단어만 허용 목록으로 만든다.
     allowed_evidence_words = _collect_allowed_evidence_words(case_data, detective_mentions)
     all_evidence_words = _all_evidence_words(case_data)
     turn_pressure_context = _build_turn_pressure_context_v2(case_data, interrogation_signal)
@@ -430,6 +448,8 @@ def llm_suspect_answer(
     reply_length_bias = reply_personality_factors.get("reply_length_bias", 1.0)
     personality_speaking_directives = _build_personality_speaking_directives(case_data)
 
+    # 상태 기반 가드레일을 매 턴 추가해, 같은 사건이라도 성향/PAD/붕괴 단계에 따라
+    # 답변 길이와 흔들림 정도가 달라지도록 한다.
     extra_guard = ""
     if turn_pressure_context:
         extra_guard += turn_pressure_context
@@ -532,6 +552,7 @@ def llm_suspect_answer(
         has_current_contradiction,
     )
 
+    # LLM 답변이 질문을 벗어나거나 너무 회피적으로 나오면 한 번 더 보정한다.
     review = llm_review_suspect_reply(user_text, out)
     should_retry_for_specificity = (
         pressure_level in {"medium", "high"} or has_current_contradiction

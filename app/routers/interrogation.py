@@ -1,3 +1,9 @@
+"""심문 진행 관련 API 라우터.
+
+실제 처리 로직은 services/interrogation_service.py에 두고,
+이 파일은 URL과 핸들러를 연결하는 얇은 계층만 담당한다.
+"""
+
 from fastapi import APIRouter
 
 from app.services import interrogation_service

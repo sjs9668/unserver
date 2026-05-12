@@ -1,3 +1,10 @@
+"""하드 모순과 소프트 모순을 판정하는 서비스.
+
+하드 모순은 사건 파일의 truth_slots/evidences/contradictions와 NPC 답변이
+직접 충돌하는지 룰 기반으로 확인한다. 소프트 모순은 대화 중 "안 갔다"가
+"잠깐 갔다"처럼 바뀌는 진술 흔들림을 최근 발화와 비교해 감지한다.
+"""
+
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -24,6 +31,8 @@ def _slot_value_tokens(value: str) -> List[str]:
 
 SLOT_EXTRACTION_MIN_SCORE = 0.58
 
+# 장소/관계/도구 표현은 한국어 자유 발화에서 흔들리기 쉬워,
+# 비교 전에 대표 표현으로 맞춰 하드 모순 오탐을 줄인다.
 PLACE_TEXT_REPLACEMENTS: Tuple[Tuple[str, str], ...] = (
     ("물류창고", "창고"),
     ("창고입구", "창고근처"),
@@ -301,6 +310,7 @@ def _extract_claimed_slot_value_with_confidence(
     target_slot: str,
     case_data: Optional[Dict[str, Any]],
 ) -> Tuple[str, float]:
+    """NPC 답변에서 질문 대상 슬롯의 주장값을 추출하고 신뢰도를 함께 반환한다."""
     if not target_slot or not answer:
         return "", 0.0
 
@@ -352,6 +362,7 @@ def _contradiction_requires_evidence(
     related_evidence: set,
     mentioned_evidence_set: set,
 ) -> bool:
+    """해당 모순을 인정하려면 플레이어가 관련 증거를 제시해야 하는지 판단한다."""
     if not contradiction_type:
         return bool(related_evidence) and not (mentioned_evidence_set & related_evidence)
     if contradiction_type in {"claim_vs_evidence", "alibi_mismatch", "timeline_mismatch"}:
@@ -379,6 +390,7 @@ def detect_contradictions_from_slot(
     case_data: Optional[Dict[str, Any]],
     mentioned_evidence_ids: List[str],
 ) -> List[str]:
+    """추출된 주장값과 사건 파일의 진실/증거를 비교해 하드 모순 ID를 찾는다."""
     if not case_data or not target_slot or not claimed_value:
         return []
 
@@ -399,6 +411,8 @@ def detect_contradictions_from_slot(
     elif target_slot == "last_seen_place":
         allowed_slots |= {"crime_place"}
 
+    # 한 답변에서 여러 모순 후보가 잡힐 수 있어 질문 슬롯, 증거 언급 여부,
+    # 모순 유형을 점수화한 뒤 가장 강한 후보 하나만 반환한다.
     contradiction_candidates: List[Tuple[int, str]] = []
     for contradiction in _case_contradictions(case_data):
         contradiction_id = norm(contradiction.get("id", ""))
@@ -457,6 +471,7 @@ def analyze_interrogation_turn_rule_based(
     suspect_text: str,
     question_analysis: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    """한 턴의 NPC 답변을 사건 데이터와 비교해 하드 모순 판정 결과를 만든다."""
     if question_analysis is None:
         from app.services.openai_service import llm_evaluate_interrogation
         analysis = llm_evaluate_interrogation(case_data, history, user_text)
@@ -612,6 +627,7 @@ def _extract_dialogue_place(text: str) -> str:
     return ""
 
 def llm_review_suspect_reply(user_text: str, suspect_text: str) -> Dict[str, Any]:
+    """생성 답변이 최신 질문에 직접 답했는지 로컬 휴리스틱으로 검토한다."""
     detective_text = norm(user_text)
     reply_text = norm(suspect_text)
     if not reply_text:
@@ -674,6 +690,7 @@ def detect_dialogue_contradiction_local(
     user_text: str,
     suspect_text: str,
 ) -> Dict[str, Any]:
+    """최근 대화 기록과 현재 답변을 비교해 소프트 모순 신호를 감지한다."""
     current_suspect_text = norm(suspect_text)
     if not current_suspect_text:
         return _empty_dialogue_contradiction_signal("empty suspect reply")
@@ -692,6 +709,7 @@ def detect_dialogue_contradiction_local(
     if not prior_turns:
         return _empty_dialogue_contradiction_signal("no prior suspect statements")
 
+    # 최신 진술부터 역순으로 비교해, 가장 가까운 발화 변화에 우선 반응한다.
     for prior_text in reversed(prior_turns):
         prior_flags = _extract_dialogue_flags(prior_text)
         prior_place = _extract_dialogue_place(prior_text)

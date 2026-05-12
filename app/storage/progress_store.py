@@ -1,3 +1,9 @@
+"""심문 진행 상태 저장소.
+
+턴별 압박도, 누적 증거/모순, PAD 상태, 진술 기록을 case_id별로 보관한다.
+최종 제출 버전에서는 메모리 저장소를 사용하므로 서버 재시작 시 진행 상태는 초기화된다.
+"""
+
 from typing import Any, Dict, List, Optional
 
 from app.schemas.interrogation import (
@@ -18,6 +24,7 @@ INTERROGATION_PROGRESS_CACHE: Dict[str, Dict[str, Any]] = {}
 
 
 def _empty_progress_state() -> Dict[str, Any]:
+    """새 심문을 시작할 때 사용하는 기본 진행 상태."""
     return {
         "breakdown_probability": 0.0,
         "referenced_evidence_ids": [],
@@ -41,6 +48,7 @@ def _empty_progress_state() -> Dict[str, Any]:
 
 
 def _get_progress_state(case_id: str) -> Dict[str, Any]:
+    """case_id에 연결된 진행 상태를 읽고, 깨진 값은 정규화한다."""
     if not case_id:
         return _empty_progress_state()
 
@@ -70,6 +78,7 @@ def _store_progress_state(
     submitted_judgment: Optional[Dict[str, Any]] = None,
     final_psychological_report: Optional[Dict[str, Any]] = None,
 ) -> None:
+    """한 턴 처리 후의 심문 진행 상태를 표준 형태로 저장한다."""
     if not case_id:
         return
 
@@ -105,6 +114,7 @@ def _store_progress_state(
 
 
 def _persist_progress_snapshot(case_id: str, progress_state: Dict[str, Any]) -> Dict[str, Any]:
+    """외부에서 만든 진행 상태 스냅샷도 같은 정규화 경로로 저장한다."""
     normalized = normalize_progress_state(progress_state or {})
     _store_progress_state(
         case_id,

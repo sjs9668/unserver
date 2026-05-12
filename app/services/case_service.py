@@ -1,3 +1,10 @@
+"""사전 제작 사건 파일을 서버 런타임 형식으로 변환하는 서비스.
+
+초기 구조의 LLM 사건 즉석 생성 대신, 최종 제출 버전은 cases/prebuilt의
+JSON 사건 파일을 불러온다. 이 파일은 플레이어에게 보여 줄 수사 문서와,
+서버가 판정에 사용하는 truth_slots/evidences/contradictions를 함께 가진다.
+"""
+
 import random
 import traceback
 from typing import Any, Dict, List, Optional
@@ -41,6 +48,7 @@ VALID_CONTRADICTION_TYPES = {
 
 
 def _default_truth_slots() -> Dict[str, str]:
+    """모순 판정에서 비교할 사건 핵심 사실 슬롯 기본값."""
     return {slot_name: "" for slot_name in TRUTH_SLOT_NAMES}
 
 def _normalize_documents(
@@ -48,6 +56,7 @@ def _normalize_documents(
     overview: Dict[str, Any],
     suspect: Dict[str, Any],
 ) -> Dict[str, Any]:
+    """사건 수첩 UI에 보여 줄 문서형 자료를 표준 필드로 정리한다."""
     documents = raw_documents if isinstance(raw_documents, dict) else {}
     case_overview = documents.get("case_overview", {}) if isinstance(documents.get("case_overview"), dict) else {}
     scene_report = documents.get("scene_report", {}) if isinstance(documents.get("scene_report"), dict) else {}
@@ -77,11 +86,11 @@ def _normalize_documents(
 
 def coerce_case_payload(case_blob: Any, fallback_case_id: str = "") -> Optional[Dict[str, Any]]:
     """
-    Normalize one case file into the server's runtime structure.
+    사건 JSON 하나를 서버가 실제 심문 중 사용하는 구조로 정규화한다.
 
-    Important:
-    - documents / suspect_profile are retained for briefing, UI, and later extensions
-    - the existing interrogation engine still runs on truth_slots / evidences / contradictions
+    핵심 구분:
+    - documents / suspect_profile: 플레이어 브리핑, 성향 그래프, UI 표시용 데이터
+    - truth_slots / evidences / contradictions: 하드 모순과 압박 계산에 쓰는 판정 데이터
     """
     if not isinstance(case_blob, dict):
         return None
@@ -199,6 +208,7 @@ def coerce_case_payload(case_blob: Any, fallback_case_id: str = "") -> Optional[
     }
 
 def load_prebuilt_case_library() -> List[Dict[str, Any]]:
+    """사전 제작 사건 JSON 전체를 읽어 정규화된 사건 목록으로 반환한다."""
     cases: List[Dict[str, Any]] = []
     for path in sorted(PREBUILT_CASE_DIR.glob("*.json")):
         case_blob = read_json_file(path, None)
@@ -209,6 +219,7 @@ def load_prebuilt_case_library() -> List[Dict[str, Any]]:
     return cases
 
 def pick_prebuilt_case_choices(num_choices: int = 3) -> List[Dict[str, Any]]:
+    """게임 시작 화면에 노출할 사건 후보를 무작위로 선택한다."""
     library = load_prebuilt_case_library()
     if not library:
         return []
@@ -219,6 +230,7 @@ def pick_prebuilt_case_choices(num_choices: int = 3) -> List[Dict[str, Any]]:
     return random.sample(library, num_choices)
 
 def _public_case_briefing(case_data: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """클라이언트에 공개해도 되는 사건 브리핑만 추려 반환한다."""
     if not isinstance(case_data, dict):
         return {}
     suspect = case_data.get("suspect", {}) if isinstance(case_data.get("suspect"), dict) else {}
